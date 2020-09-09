@@ -1,0 +1,18 @@
+#
+# inittab       This file describes how the INIT process should set up
+#               the system in the mindi-busybox context
+#
+
+# Order is important, read from bottom to top
+
+# By default launch the MondoRescue script
+console::sysinit:/etc/init.d/rcS
+
+console::restart:/sbin/init
+
+# Trap CTRL-ALT-DELETE
+null::ctrlaltdel:/sbin/reboot
+
+null::shutdown:/bin/killall klogd
+null::shutdown:/bin/killall syslogd
+null::shutdown:/bin/umount -a -r

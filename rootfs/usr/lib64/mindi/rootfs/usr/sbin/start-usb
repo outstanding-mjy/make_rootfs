@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+# $Id$
+#
+# This script sets up the USB media
+#
+
+# Get info from config file
+MRUSBDEV=`grep usb-dev /tmp/mondorestore.cfg 2> /dev/null | cut -d' ' -f2-`
+
+# info from cmdline are predominent
+for i in `cat /proc/cmdline` ; do
+	echo $i | grep -qi usb= && MRUSBDEV=`echo $i | cut -d= -f2`
+done
+
+if [ $MRUSBDEV = "" ]; then
+	# No usb configuration neither stored during archive
+	# nor on cmdline so no usb wanted => exiting
+	exit 0
+fi
+
+export MRUSBDEV
+
+echo -en "Mounting USB device (${MRUSBDEV}1) on /mnt/cdrom..."
+/sbin/modprobe usb-storage
+for i in 1 2 3 4 5 6 7 8 9 10 ; do
+		sleep 1
+		echo -en "."
+done
+mount -t vfat ${MRUSBDEV}1 /mnt/cdrom && LogIt "USB device (${MRUSBDEV}1) mounted on /mnt/cdrom" 
+echo "."

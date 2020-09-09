@@ -1,0 +1,47 @@
+#!/bin/sh
+# Ensure grub will load the correct kernel on resume from hibernate,
+# TODO: This is rather redhat specific, and very grub specific.
+
+default_resume_kernel()
+{
+	local g2reboot
+	[ "$1" = "suspend" ] && return $NA
+	case $(uname -m) in
+		i?86|x86_64|athlon)
+	    		;;
+		*) # this is only valid for x86 and x86_64
+			return $NA
+	    		;;
+	esac
+
+	[ -x /sbin/grubby -a \( -x /sbin/grub -o -r /etc/grub2.cfg \) ] || \
+		return $NA
+	[ -e "/boot/vmlinuz-$(uname -r)" ] || return 1
+	out=$(/sbin/grubby --info /boot/vmlinuz-$(uname -r) |grep index | \
+		head -n 1)
+	[ -n "${out}" ] || return 1
+	current=${out#index=}
+	if [ -r /etc/grub2.cfg ]; then
+		# to enable this functionality in grub2
+		# GRUB_DEFAULT=saved is needed in /etc/default/grub
+		# if you want to be able to by-pass the selection in the
+		# boot menu, also use GRUB_SAVEDEFAULT=true
+		g2reboot=`which grub2-reboot 2>/dev/null` || \
+			g2reboot=`which grub-reboot 2>/dev/null` || return $NA
+		$g2reboot ${current} > /dev/null
+	else
+		echo "savedefault --default=${current} --once" | \
+			/sbin/grub --device-map=/boot/grub/device.map \
+			--batch --no-floppy --no-curses >/dev/null
+	fi
+
+	return 0
+}
+
+case "$1" in
+	hibernate|suspend)
+		default_resume_kernel $2
+		;;
+	*) exit $NA
+		;;
+esac

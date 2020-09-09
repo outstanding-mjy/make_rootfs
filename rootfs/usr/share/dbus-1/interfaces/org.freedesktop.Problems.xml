@@ -1,0 +1,361 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+
+<!--
+ * This is the well known dbus service name for controlling the
+ * entire daemon. The service manages crashes.
+-->
+<tp:spec xmlns:tp="http://telepathy.freedesktop.org/wiki/DbusSpec#extensions-v0">
+    <tp:title>Problems API Specification</tp:title>
+    <tp:version>0.1</tp:version>
+    <tp:copyright>
+      Copyright (C) 2012 Red Hat
+    </tp:copyright>
+    <tp:copyright>
+      Copyright (C) 2012 ABRT Team &lt;crash-catcher@lists.fedorahosted.org&gt;
+    </tp:copyright>
+
+    <!--
+     * ======================================================================================
+     * Problems Service Interface
+     *
+    -->
+
+    <node name="/org/freedesktop/Problems">
+        <interface name="org.freedesktop.Problems">
+            <tp:docstring>The Problems Service manages all the crashes.</tp:docstring>
+
+            <method name='NewProblem'>"
+                <tp:docstring>Creates a new problem and returns it's identifier.</tp:docstring>
+
+                <arg type='a{ss}' name='problem_data' direction='in'>
+                    <tp:docstring>
+                        A dictionary describing problem. There are few commonly recognized fields but the dictionary can hold anything you need.
+                        <variablelist>
+                            <varlistentry>
+                                <term>analyzer</term>
+                                <listitem>
+                                    <para>This field should be always present. The field defines a type of problem. If the item is not provided, <emphasis role="bold">libreport</emphasis> string is used by default.</para>
+                                </listitem>
+                            </varlistentry>
+                            <varlistentry>
+                                <term>reason</term>
+                                <listitem>
+                                    <para>This field should contain a short human readable text describing the problem.</para>
+                                </listitem>
+                            </varlistentry>
+                            <varlistentry>
+                                <term>time</term>
+                                <listitem>
+                                    <para>This field is filled automaticaly.</para>
+                                </listitem>
+                            </varlistentry>
+                            <varlistentry>
+                                <term>uid</term>
+                                <listitem>
+                                    <para>Only a user with root priviledges can pass this field. For all other users the field is filled by caller's uid.</para>
+                                </listitem>
+                            </varlistentry>
+                            <varlistentry>
+                                <term>executable</term>
+                                <listitem>
+                                    <para>This is mandatory field and must contain a valid path to an executable.</para>
+                                </listitem>
+                            </varlistentry>
+                            <varlistentry>
+                                <term>component</term>
+                                <listitem>
+                                    <para>A name of package which a problematic application belongs to. If this field is provided, <emphasis role="bold">the executable field becomes optional</emphasis>.</para>
+                                </listitem>
+                            </varlistentry>
+                            <varlistentry>
+                                <term>uuid</term>
+                                <listitem>
+                                    <para>Machine readable identifier of a kind of the problem. ABRT uses this field for <emphasis role="bold">local duplicates searching</emphasis>.</para>
+                                </listitem>
+                            </varlistentry>
+                            <varlistentry>
+                                <term>duphash</term>
+                                <listitem>
+                                    <para>Machine readable identifier of a kind of the problem. ABRT uses this field for <emphasis role="bold">global duplicates searching</emphasis>.</para>
+                                </listitem>
+                            </varlistentry>
+                        </variablelist>
+                    </tp:docstring>
+                </arg>
+                <annotation name="org.qtproject.QtDBus.QtTypeName.In0" value="QHash&lt;QString,QString&gt;"/>
+
+                <arg type='s' name='problem_id' direction='out'>
+                    <tp:docstring>An indentifier of the new problem</tp:docstring>
+                </arg>
+
+                <tp:docstring>
+                    <example id="NewProblem_example_python">
+                        <title>How to create a new problems in Python</title>
+                        <programlisting>
+<![CDATA[
+#!/usr/bin/env python
+import dbus
+
+bus = dbus.SystemBus()
+
+proxy = bus.get_object("org.freedesktop.problems",
+                                  '/org/freedesktop/problems')
+
+problems = dbus.Interface(proxy, dbus_interface='org.freedesktop.problems')
+
+description = {"analyzer"    : "libreport",
+               "reason"      : "Application has been killed",
+               "backtrace"   : "die()",
+               "executable"  : "/usr/bin/foo"}
+
+problems.NewProblem(description)
+]]>
+                        </programlisting>
+                    </example>
+                    <example id="NewProblem_example_bash">
+                        <title>How to create a new problems in Bash</title>
+                        <programlisting>
+<![CDATA[
+#!/usr/bin/bash
+dbus-send --system --type=method_call --print-reply \
+          --dest=org.freedesktop.problems /org/freedesktop/problems \
+          org.freedesktop.problems.NewProblem \
+          dict:string:string:analyzer,libreport,reason,"Application has been killed",backtrace,"die()",executable,"/usr/bin/true"
+]]>
+                        </programlisting>
+                    </example>
+                </tp:docstring>
+            </method>
+
+            <method name='GetProblems'>
+                <tp:docstring>Gets a list of problem identifiers for problems visible by the caller.</tp:docstring>
+
+                <arg type='as' name='response' direction='out'>
+                    <tp:docstring>List of problem identifiers</tp:docstring>
+                </arg>
+
+                <tp:docstring>
+                    <example id="GetProblems_example_python">
+                        <title>How to get the list of problems in Python</title>
+                        <programlisting>
+<![CDATA[
+#!/usr/bin/env python
+import dbus
+
+bus = dbus.SystemBus()
+
+proxy = bus.get_object("org.freedesktop.problems",
+                                  '/org/freedesktop/problems')
+
+problems = dbus.Interface(proxy, dbus_interface='org.freedesktop.problems')
+prblms = problems.GetProblems()
+]]>
+                        </programlisting>
+                    </example>
+                </tp:docstring>
+
+            </method>
+
+            <method name='GetForeignProblems'>
+                <tp:docstring>Gets a list of problem identifiers for problems not directly accessible by the caller.</tp:docstring>
+
+                <arg type='as' name='response' direction='out'>
+                    <tp:docstring>List of problem identifiers</tp:docstring>
+                </arg>
+
+            </method>
+
+
+
+            <method name='GetAllProblems'>
+                <tp:docstring>Gets a list of problems visible by the caller.</tp:docstring>
+
+                <arg type='as' name='response' direction='out'>
+                    <tp:docstring>List of problem identifiers</tp:docstring>
+                </arg>
+            </method>
+
+            <method name='GetInfo'>
+                <tp:docstring>Gets a value of problem's element.</tp:docstring>
+
+                <arg type='s' name='problem_dir' direction='in'>
+                    <tp:docstring>Identifier of problem from which we want to get info.</tp:docstring>
+                </arg>
+
+                <arg type='as' name='element_names' direction='in'>
+                    <tp:docstring>A list of names of required info.</tp:docstring>
+                </arg>
+
+                <arg type='a{ss}' name='response' direction='out'>
+                    <tp:docstring>A list of values of the requested elements.</tp:docstring>
+                </arg>
+                <annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="QHash&lt;QString,QString&gt;"/>
+
+                <tp:docstring>
+                    <example id="GetInfo_example_python">
+                        <title>How to use GetInfo() method to print out a nice list of problems</title>
+                        <programlisting>
+<![CDATA[
+#!/usr/bin/env python
+from sys import stdout
+import dbus
+from datetime import datetime
+
+bus = dbus.SystemBus()
+
+proxy = bus.get_object("org.freedesktop.problems",
+                          '/org/freedesktop/problems')
+
+problems = dbus.Interface(proxy, dbus_interface='org.freedesktop.problems')
+
+for prblmid in problems.GetProblems():
+    kv = problems.GetInfo(prblmid, ["time", "count", "package", "reason"])
+
+    date = datetime.fromtimestamp(float(kv["time"]))
+    count = int(kv.get("count", 0))
+    package = str(kv.get("package", ""))
+    reason = str(kv.get("reason", ""))
+
+    stdout.write("{0} {1:-3} {2:30} : {3}\n".format(date, count, package, reason))
+]]>
+                        </programlisting>
+                    </example>
+                </tp:docstring>
+
+            </method>
+
+            <method name='SetElement'>
+                <tp:docstring>Sets a value of problem's element.</tp:docstring>
+
+                <arg type='s' name='problem_dir' direction='in'>
+                    <tp:docstring>An identifier of problem.</tp:docstring>
+                </arg>
+
+                <arg type='s' name='name' direction='in'>
+                    <tp:docstring>A name of set element.</tp:docstring>
+                </arg>
+
+                <arg type='s' name='value' direction='in'>
+                    <tp:docstring>A value of problem's element.</tp:docstring>
+                </arg>
+            </method>
+
+            <method name='DeleteElement'>
+                <tp:docstring>Deletes problem's element.</tp:docstring>
+
+                <arg type='s' name='problem_dir' direction='in'>
+                    <tp:docstring>An identifier of problem.</tp:docstring>
+                </arg>
+
+                <arg type='s' name='name' direction='in'>
+                    <tp:docstring>A name of deleted element.</tp:docstring>
+                </arg>
+            </method>
+
+            <method name='TestElementExists'>
+                <tp:docstring>Checks whether the element exists.</tp:docstring>
+
+                <arg type='s' name='problem_dir' direction='in'>
+                    <tp:docstring>An identifier of problem.</tp:docstring>
+                </arg>
+
+                <arg type='s' name='name' direction='in'>
+                    <tp:docstring>A name of checked element.</tp:docstring>
+                </arg>
+
+                <arg type='b' name='response' direction='out'>
+                    <tp:docstring>True if the element exists; otherwise false.</tp:docstring>
+                </arg>
+            </method>
+
+            <method name='GetProblemData'>"
+                <tp:docstring>Returns problem's data.</tp:docstring>
+
+                <arg type='s' name='problem_dir' direction='in'>
+                    <tp:docstring>An identifier of problem.</tp:docstring>
+                </arg>
+
+                <arg type='a{sits}' name='problem_data' direction='out'>
+                    <tp:docstring>A dictionary where keys are element names and values are triplets (element libreport flags, element size, element contents).</tp:docstring>
+                </arg>
+            </method>
+
+            <method name='ChownProblemDir'>
+                <tp:docstring>Assures ownership of a specified problem for the caller.</tp:docstring>
+
+                <arg type='s' name='problem_dir' direction='in'>
+                    <tp:docstring>An indetifier of the problem.</tp:docstring>
+                </arg>
+            </method>
+
+            <method name='DeleteProblem'>
+                <tp:docstring>Deletes a specified problem.</tp:docstring>
+
+                <arg type='as' name='problem_dir' direction='in'>
+                    <tp:docstring>An identifier of problem to be deleted.</tp:docstring>
+                </arg>
+            </method>
+
+            <method name='FindProblemByElementInTimeRange'>
+                <tp:docstring>Finds an problem having an element's value and has been created in specified time range.</tp:docstring>
+
+                <arg type='s' name='element' direction='in'>
+                    <tp:docstring>A name of searched element.</tp:docstring>
+                </arg>
+
+                <arg type='s' name='value' direction='in'>
+                    <tp:docstring>A value of the searched element.</tp:docstring>
+                </arg>
+
+                <arg type='x' name='timestamp_from' direction='in'>
+                    <tp:docstring>Beginnig of required time range.</tp:docstring>
+                </arg>
+
+                <arg type='x' name='timestamp_to' direction='in'>
+                    <tp:docstring>End of required time range.</tp:docstring>
+                </arg>
+
+                <arg type='b' name='all_users' direction='in'>
+                    <tp:docstring>Perform a look up in all system problems.</tp:docstring>
+                </arg>
+
+                <arg type='as' name='response' direction='out'>
+                    <tp:docstring>List of problem idnetifiers.</tp:docstring>
+                </arg>
+            </method>
+
+            <method name='Quit'>
+                <tp:docstring>Kills the service.</tp:docstring>
+            </method>
+
+            <signal name='Crash'>
+                <tp:docstring>A new system problem has been detected. This is the second variant of the Crash signal with additional argument <emphasis>uid</emphasis></tp:docstring>
+
+                <arg type='s' name='package' direction='out'>
+                    <tp:docstring>List of problem idnetifiers.</tp:docstring>
+                </arg>
+
+                <arg type='s' name='problem_id' direction='out'>
+                    <tp:docstring>An identifier of the newly created problem.</tp:docstring>
+                </arg>
+
+                <arg type='s' name='uid' direction='out'>
+                    <tp:docstring>UID of user who reported this problem.</tp:docstring>
+                </arg>
+
+                <arg type='s' name='uuid' direction='out'>
+                    <tp:docstring>UUID - a weak problem identifier usuful for local duplicates look up.</tp:docstring>
+                </arg>
+
+                <arg type='s' name='duphash' direction='out'>
+                    <tp:docstring>DUPHASH - a strong problem identifier usuful for global duplicates look up.</tp:docstring>
+                </arg>
+
+            </signal>
+
+        </interface>
+
+    </node>
+
+</tp:spec>

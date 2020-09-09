@@ -1,0 +1,119 @@
+#!/bin/sh
+#
+# $Id: post-init 3543 2016-03-24 17:28:21Z bruno $
+#
+#------------------------------------------------------------
+
+if [ -f "/tmp/mountlist.txt" ]; then
+	echo "Here is my /tmp/mountlist.txt" >> $LOGFILE
+	cat /tmp/mountlist.txt >> $LOGFILE
+fi
+
+iso=`grep iso /proc/cmdline`
+nuke=`grep nuke /proc/cmdline`
+if [ "$nuke" = "" ] ; then
+    nuke=`grep -i "RESTORE " /proc/cmdline`
+fi
+expert=`grep expert /proc/cmdline`
+compare=`grep compare /proc/cmdline`
+interactive=`grep interactive /proc/cmdline`
+pxe=`grep pxe /proc/cmdline`
+[ "$interactive" ]  && expert=""; # in case 'expert' crops up somewhere
+if which mondorestore > /dev/null 2> /dev/null ; then
+    LogIt "mondorestore found; cool..."
+else
+    if [ "$iso$nuke$compare$interactive$pxe" != "" ] ; then
+		LogIt "The mondorestore command was not found on your backup media" 1
+		LogIt "It may mean your device is not seen correctly." 1
+		LogIt "Check driver list and error messages." 1
+		exit 0
+    else
+		LogIt "Mindi-Linux has finished booting."
+    fi
+fi
+
+if [ -h "`which mondorestore`" ] ; then
+    LogIt "Turning mondorestore from a hyperlink into an executable"
+    cat `which mondorestore` > /usr/bin/MR
+# in case there's more than one instance :)
+    rm -f `which mondorestore 2> /dev/null`
+    rm -f `which mondorestore 2> /dev/null`
+    rm -f `which mondorestore 2> /dev/null`
+    rm -f `which mondorestore 2> /dev/null`
+    mv /usr/bin/MR /usr/bin/mondorestore
+    chmod +x /usr/bin/mondorestore
+fi
+
+if which bootstrap > /dev/null 2> /dev/null ; then
+    LogIt "Calling bootstrap script" 1
+    bootstrap
+fi
+
+for i in mr-mount-me mr-unmount-me; do
+    if which $i > /dev/null 2> /dev/null ; then
+        LogIt "$i found"
+    else
+        LogIt "Warning - $i not found on ramdisk."
+    fi
+done
+
+mondoopt=""
+if [ "`grep -i 'obdr ' /tmp/mondorestore.cfg 2> /dev/null`" ]; then
+	mondoopt="$mondoopt -o -d $TAPEDEV"
+fi
+
+if [ "`grep -i 'debug' /proc/cmdline`" ]; then
+	mondoopt="$mondoopt -K 99"
+fi
+
+# Now suppress msg redirection to avoid poluting log file
+exec 2>&4 >&5 4>&- 5>&-
+
+if [ "$compare" ] ; then
+    LogIt "------------------COMPARE MODE-----------------" 1
+    mondorestore $mondoopt -Z compare
+elif [ "$nuke" ] ; then
+    LogIt "-------------------NUKE MODE-------------------" 1
+    mondorestore $mondoopt -Z nuke
+elif [ "$expert" ] ; then
+    if [ "`grep tapedev /tmp/mondorestore.cfg 2> /dev/null`" ] ; then
+	LogIt "-------------------TAPE MODE-------------------" 1
+	loc=`which mondorestore 2> /dev/null`
+	if [ "$loc" = "" ] ; then
+	    LogIt "I presume you backed up with Mindi, not Mondo." 1
+	else
+	    LogIt "Tape Mode -- calling mondorestore..."
+            if [ "$nuke" ] ; then
+                mondorestore $mondoopt -Z nuke
+            else
+	        	mondorestore $mondoopt; # MR will detect & access the tape
+            fi
+	fi
+    elif [ "`grep using-cdstream /tmp/mondorestore.cfg 2> /dev/null`" ] ; then
+        LogIt "------------------CDSTREAM MODE------------------" 1
+        loc=`which mondorestore 2> /dev/null`
+        if [ "$loc" = "" ] ; then
+            LogIt "I presume you backed up with Mindi, not Mondo." 1
+        else
+            LogIt "Cdstream Mode -- calling mondorestore..."
+            if [ "$nuke" ] ; then
+                mondorestore -Z nuke $mondoopt
+            else
+                mondorestore $mondoopt; # MR will detect & access the cdstream
+            fi
+        fi
+    else
+		LogIt "------------------EXPERT MODE------------------" 1
+		LogIt "You do all the work. :-)" 1
+		if which mondorestore > /dev/null 2> /dev/null ; then
+            LogIt "Type 'mondorestore' to begin the restore/compare process." 1
+        fi
+    fi
+else
+    LogIt "------------------INTERACTIVE------------------" 1
+    mondorestore -Z interactive $mondoopt
+fi
+
+[ -e "/tmp/DO-MBR-PLEASE" ] && LogIt "PLEASE RUN 'mondorestore -Z mbr' NOW TO INITIALIZE YOUR BOOT SECTOR." 1
+
+exit 0

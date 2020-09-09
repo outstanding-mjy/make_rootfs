@@ -1,0 +1,1152 @@
+#!/bin/bash
+#
+# $Id: rcS 3542 2016-03-24 16:48:03Z bruno $
+#
+# init script launched during the restore process
+#------------------------------------------------------------
+
+CaughtSoftReset() {
+	trap SIGTERM
+
+	reboot
+}
+
+
+ConfigureLoggingDaemons() {
+	echo -en "Running klogd..."
+	klogd -c 2 > /dev/null 2> /dev/null
+	echo -en "Done.\nRunning syslogd..."
+	syslogd > /dev/null 2> /dev/null
+	echo "Done."
+	LogIt "klogd and syslogd have been started."
+}
+
+
+
+CopyBootDevEntry() {
+	local outfile devfile
+	devfile=/dev/boot_device
+	outfile=`cat /BOOTLOADER.DEVICE 2> /dev/null`
+	[ ! "$outfile" ] && return 0
+	echo -en "Copying boot device to $outfile..."
+	if [ -e "$outfile" ] ; then
+		echo "not needed."
+		return 0
+	fi
+	mkdir -p $outfile
+	rmdir $outfile
+	cp -pRdf $devfile $outfile
+	if [ "$?" -ne "0" ] ; then
+		echo "Failed."
+		return 1
+	else
+		echo "OK."
+		return 0
+	fi
+}
+
+
+GetShell() {
+	echo -en "Type 'exit' to reboot the PC\n"
+	umount -d /mnt/cdrom 2> /dev/null
+	mount / -o rw,remount > /dev/null 2> /dev/null
+	for i in `cat /proc/cmdline`; do
+		echo $i | grep -qi console= && console=`echo $i | cut -d= -f2`
+		echo $i | grep -qi serial= && serial=`echo $i | cut -d= -f2`
+	done
+	LogIt "Launching Shell"
+	if [[ $serial != "" && -e $serial ]]; then
+		setsid sh -c "exec sh <$serial >$serial 2>&1"
+	elif [[ $console != "" && -e /dev/$console ]]; then
+		setsid sh -c "exec sh </dev/$console >/dev/$console 2>&1"
+	else
+		setsid sh -c "exec sh </dev/tty1 >/dev/tty1 2>&1"
+	fi
+}
+
+
+Die() {
+	LogIt "Fatal error! $1" 1
+	GetShell
+}
+
+
+ExtractDevTarballs() {
+	cd /
+	if [ -x /usr/lib/systemd/systemd-udevd ] || [ -x /lib/systemd/systemd-udevd ]; then
+		# Just use vc dev files. The other are useless and create huge delays with LVM
+		tar -zxf /vc.tgz || LogIt "Error occurred while extracting /vc.tgz"
+	else
+		for fname in ataraid.tgz ida.tgz i2o.tgz rd.tgz raw.tgz cciss.tgz nst.tgz dm.tgz vc.tgz ; do
+			if [ ! -e "/$fname" ] ; then
+		    	LogIt "/$fname not found; cannot extract to /." 1
+			else
+		    	echo -en "\rExtracting /$fname...     "
+		    	tar -zxf /$fname || LogIt "Error occurred while extracting /$fname"
+			fi
+		done
+	fi
+	echo -en "\r"
+	LogIt "Extracted additional /dev entries OK.     " 1
+}
+
+
+
+LaunchTerminals() {
+	# Depending on busybox version, syntax of openvt is different
+	/bin/busybox --help 2>&1 | head -1 | grep -Eq "1\.7\.3|1\.2\."
+	if [ "$?" -eq "0" ] ; then
+		opt=""
+	else
+		# 1.18.3 requires -c
+		opt="-c"
+	fi
+	echo "Launching terminals on other ttys - Use ALT+F[2-6] to use them"
+	openvt $opt 2 /bin/sh
+	openvt $opt 3 /bin/sh
+	openvt $opt 4 /bin/sh
+	openvt $opt 5 /bin/sh
+	openvt $opt 6 /bin/sh
+	openvt $opt 7 /bin/sh /sbin/wait-for-petris
+	openvt $opt 8 /usr/bin/tail -f $LOGFILE
+	if [ -f /var/log/messages ]; then
+		openvt $opt 9 /usr/bin/tail -f /var/log/messages
+	fi
+	# May avoid shell error messages
+	chmod 666 /dev/tty* /dev/console
+	# By default first serial line is configured as tty
+	# Required to have a correct serial console support (MP on ia64 or VSP with iLO e.g.)
+	for i in `cat /proc/cmdline` ; do
+		echo $i | grep -qi serial= && serial=`echo $i | cut -d= -f2`
+	done
+	# Doing that is only valid when using a real serial line
+	if [[ $serial != "" && -e $serial ]]; then
+		LogIt "Redirecting serial $serial to /dev/tty" 1
+		ln -s -f $serial /dev/tty
+	fi
+}
+
+
+LoadKeymap() {
+	local fname
+	fname=`grep keymap-lives-here /tmp/mondorestore.cfg | cut -f2 -d' ' 2> /dev/null`
+	[ "$fname" = "" ] && return
+	if which loadkeys > /dev/null 2> /dev/null ; then
+		loadkeys $fname
+		LogIt "Using $fname keyboard map." 1
+	else
+		LogIt "Using default US keyboard map." 1
+	fi
+}
+
+
+UntarTapeStuff() {
+	local old_pwd res
+	old_pwd=`pwd`
+	cd $GROOVY
+	[ "$1" != "" ] && tapedev=$1
+	[ ! "$tapedev" ] && tapedev=`grep media-dev /tmp/mondorestore.cfg 2>/dev/null | tr -s ' ' ' ' | cut -d' ' -f2`
+	mt -f $tapedev rewind
+	if [ $? -ne 0 ]; then
+		LogIt "WARNING: $tapedev failed to rewind, either not a tape or still in OBDR mode." 1
+		LogIt "         Trying to find the corresponding SCSI generic device." 1
+		c=0
+		for d in `ls /sys/class/scsi_device/*`; do
+			devtype=`cat $d/device/type`
+			if [ "$devtype" -eq "1" ]; then
+				LogIt "NOTE: Device /dev/sg$c is a Sequential device." 1
+				if [ -x /usr/bin/sg_map ]; then
+					dev=`/usr/bin/sg_map | grep -E "^/dev/sg$c" | awk '{print $2}'`
+					LogIt "      Retry using device $dev" 1
+				fi
+			elif [ "$devtype" -eq "0" ]; then
+				# Skipping a HDD
+				/bin/true
+			elif [ "$devtype" -eq "5" ]; then
+				# Checking whether it's a CD or a tape in OBDR mode
+				grep -q -i -E 'dat|ultrium|tape' $d/device/model
+				if [ $? -eq 0 ]; then
+					# Is probably a Tape drive left in OBDR.
+					LogIt "Found that /dev/sg$c is a tape drive (`cat $d/device/model`)." 1
+					grep -q -i -w 'hp' $d/device/vendor
+					if [ $? -eq 0 ]; then
+						LogIt "This is an HP tape drive, even better :-)." 1
+					fi
+					if [ -x /usr/bin/sg_reset ]; then
+						OBDR_MODS="st mptsas mptspi aic7xxx aic94xx mpt2sas "
+						if [ "`grep -i obdrmods /proc/cmdline`" ]; then
+							OBDR_MODS="$OBDR_MODS `cat /proc/cmdline | sed 's~.*obdrmods=\"\(.*\)\".*~\1~'`"
+						fi
+						LogIt "Removing modules $OBDR_MODS." 1
+						for m in $OBDR_MODS; do
+							rmmod $i
+						done
+						LogIt "Trying to force device /dev/sg$c to be in sequential mode." 1
+						/usr/bin/sg_reset -d /dev/sg$c
+						LogIt "Inserting modules `rev $OBDR_MODS`." 1
+						for m in `rev $OBDR_MODS`; do
+							modprobe $i
+						done
+						LogIt "Retry again as the device has been set back into sequential mode." 1
+						mt -f $tapedev fsf 2
+						res=$?
+						# exit the loop to continue and return if that previous mt failed. 
+						# If it succeeded we transparently continue !!
+						break
+					else
+						LogIt "WARNING: Unable to reset /dev/sg$c as the sg_reset command is not availble." 1
+					fi
+				fi
+			else 
+				LogIt "Device /dev/sg$c has an unknown type $devtype." 1
+			fi
+			c=`expr $c + 1`
+		done
+
+		if [ $res -ne 0 ]; then
+			cd $old_pwd
+			return $res
+		fi
+	fi
+
+	mt -f $tapedev fsf 2
+	# 32k is DEFAULT_INTERNAL_TAPE_BLOCK_SIZE
+	mt -f $tapedev setblk 32768
+	dd if=$tapedev bs=32k count=1024 | tar -zx
+	res=$?
+	if [ "$res" -eq "0" ] ; then
+		# Store the dev name in case we changed it interactively
+		if [ -f "/tmp/mondorestore.cfg" ]; then
+			sed -i "s/^media-dev .*$/media-dev  $tapedev/" /tmp/mondorestore.cfg
+		fi
+	fi
+	cd $old_pwd
+	return $res
+}
+
+HandleTape() {
+	local res tapedev
+	tapedev="" ; # will be set by UntarTapeStuff()
+
+	# Here we can add the USB storage module, it's working even with OBDR !
+	modprobe -q usb-storage 2> /dev/null
+	# Tape takes some time to appear
+	sleep 10
+	cd $GROOVY
+	UntarTapeStuff $tapedev
+	res=$?
+	tapedev="default tape device"
+	while [ "$res" -ne "0" ] ; do
+		LogIt "$tapedev failed to act as extended data disk for booting." 1
+		LogIt "Please specify an alternate non-rewinding tape device, such as /dev/nst0" 1
+		LogIt "or hit <Enter> to boot from another media." 1
+		echo -en "---> "
+		read tapedev
+		if [ "$tapedev" ] ; then
+		    LogIt "User specified $tapedev instead"
+		    UntarTapeStuff $tapedev
+		    res=$?
+		else
+		    LogIt "User opted not to specify an alternate tapedev"
+		    res=1
+	    break
+		fi
+	done
+	# For post-init
+	export TAPEDEV=$tapedev
+
+	if [ "$res" -ne "0" ] ; then
+		cd /
+		LogIt "Failed to use tape as extended datadisk. Reverting to another media." 1
+		HandleCDROM
+		res=$?
+	else
+		LogIt "Using tape as extended datadisk. Good." 3
+		echo "Using tape as extd ddisk." > /tmp/TAPEDEV-HAS-DATA-DISKS
+		res=0
+		CD_MOUNTED_OK=yes
+	fi
+	return $res
+}
+
+
+
+HandleCDROM() {
+	# Just in case we have an iLO ensure we will map it correctly
+	echo "$DENY_MODS" | grep -q "usb-storage "
+	if [ $? -eq 0 ]; then
+		return
+	fi
+	echo "Activating a potential USB Storage device"
+	modprobe -q usb-storage 2> /dev/null
+	for i in 1 2 3 4 5 6 7 8 9 10 ; do
+		sleep 1
+		echo -en "."
+	done
+
+	find-and-mount-cdrom
+	res=$?
+	if [ "$res" -ne "0" ] ; then
+		LogIt "First call to find-and-mount-cdrom failed." 1
+		LogIt "Sleeping for 3 seconds and trying again." 1
+		sleep 3
+		find-and-mount-cdrom
+		res=$?
+	fi
+	if [ "$res" -eq "0" ] ; then
+		LogIt "OK, I am running on a CD-ROM. Good." 1
+		CD_MOUNTED_OK=yes
+	else
+		LogIt "You probably not have the right drivers" 1
+		LogIt "to support the hardware on which we are running" 1
+		LogIt "Your archives are probably fine but" 1
+		LogIt "your tape streamer and/or CD-ROM drive are unsupported at that point." 1
+		CD_MOUNTED_OK=""
+	fi
+	return 0
+}
+
+
+PauseForRaids() {
+	if [ "`dmesg | grep -i "RAID Controller"`" != "" ] || [ "`dmesg | grep -i "Vendor: 3ware"`" != "" ] ; then
+		LogIt "RAID controller(s) detected. Pausing 10 seconds to let them warm up." 1
+		echo -en "Pausing..."
+		for i in 1 2 3 4 5 6 7 8 9 10 ; do
+		    sleep 1
+		    echo -en "$(($i*10))%..."
+		done
+		echo "Done."
+	fi
+}
+
+
+# 06/13/2002 --- DuckX's & Hugo's new routine
+# 10/11/2003 --- added a simple devfsd.conf file
+# 01/24/2005 --- cater for arbitrary locations of devfsd.conf by using the
+#                config file path compiled into devfsd
+RunDevfsd() {
+	loc=`which devfsd 2> /dev/null`
+	if [ "$loc" != "" ] ; then
+	LogIt "Devfs found. Testing kernel support..."
+	if [ ! -e "/dev/.devfsd" ] ; then
+	    mount -t devfs devfs /dev 2>> $LOGFILE
+		if [ "$?" -ne "0" ] ; then
+			LogIt "Error while trying to mount devfs"
+	    else
+			LogIt "Devfs mounted OK"
+	    fi
+	fi
+	#check if the kernel supports devfs
+	if [ -e "/dev/.devfsd" ] ; then
+	    [ -d "/proc/1" ] || mount -n /proc
+	    LogIt "Kernel support found. Creating config file and starting devfsd"
+	    conffile=`strings $loc | grep -E "devfsd.conf$"`
+	    [ "$conffile" ] || conffile="/etc/devfsd.conf"
+	    confpath=`echo $conffile | sed "s/\/devfsd\.conf$//"`
+	    [ -d "$confpath" ] || mkdir -p $confpath
+	    echo -en "REGISTER .* MKOLDCOMPAT\nUNREGISTER .* RMOLDCOMPAT\n" > $conffile
+	    devfsd /dev &
+	    sleep 5
+	else
+	    LogIt "No devfs kernel support."
+	fi
+	fi
+}
+
+# Taken from udev management in Mandriva 2008.0. Kudos guys
+MakeExtraNodes () {
+	# there are a few things that sysfs does not export for us.
+	# these things are listed in /etc/udev/links.conf
+	grep '^[^#]' /etc/udev-links.conf | \
+	while read type name arg1; do
+		[ "$type" -a "$name" -a ! -e "/dev/$name" -a ! -L "/dev/$name" ] ||continue
+		case "$type" in
+			L) ln -s $arg1 /dev/$name ;;
+			D) mkdir -p /dev/$name ;;
+			M) mknod /dev/$name $arg1 && chmod 600 /dev/$name;;
+			*) echo "udev-links.conf: unparseable line (%s %s %s)\n" "$type" "$name" "$arg1" ;;
+		esac
+	done
+}
+
+CreateDevMakedev() {
+	if [ -e /sbin/MAKEDEV ]; then
+		ln -sf /sbin/MAKEDEV /dev/MAKEDEV
+	else
+		ln -sf /bin/true /dev/MAKEDEV
+	fi
+}
+
+RunUdevd() {
+	# Initial Inspiration from Mandriva 2008.0 startup script
+	LogIt "Preparing udev environment..." 1
+	mv /dev /dev.static
+	mkdir /dev
+	# Contributed during LinuxCon Japan !
+	if [ -x /usr/lib/systemd/systemd-udevd ] || [ -x /lib/systemd/systemd-udevd ]; then
+		mount -n -t devtmpfs none /dev
+	else
+		mount -n -o size=5M,mode=0755 -t tmpfs none /dev
+		MakeExtraNodes
+		mount -n -t devpts -o mode=620 none /dev/pts
+	fi
+	mkdir -p /dev/shm
+	mount -n -t tmpfs  none /dev/shm
+	if [ -e /proc/sys/kernel/hotplug ]; then
+		echo > /proc/sys/kernel/hotplug
+	fi
+	PKLVL=`cut -f1 /proc/sys/kernel/printk`
+	echo 0 > /proc/sys/kernel/printk
+	# Many possibilities depending on udev versions
+	if [ -x /sbin/startudev ]; then
+		/sbin/startudev
+	fi
+	if [ -x /sbin/start_udev ]; then
+		/sbin/start_udev
+	fi
+	# Depending on udevd version it gives back the hand or not :-(
+	ps | grep -v grep |grep udevd 2> /dev/null 1> /dev/null
+	if [ $? -ne 0 ]; then
+		echo "Waiting for udev to start..."
+		if [ -x /sbin/udevd ]; then
+			/sbin/udevd --daemon &
+		elif [ -x /usr/bin/udevd ]; then
+			/usr/bin/udevd --daemon &
+		elif [ -x /usr/lib/systemd/systemd-udevd ] || [ -x /lib/systemd/systemd-udevd ]; then
+			# from https://github.com/hut/minirc/blob/master/rc
+			echo "INFO: This is the systemd version of udev"
+			# Contributed during LinuxCon Japan
+			#mount -n -t tmpfs tmpfs /sys/fs/cgroup
+			#mount -n -t cgroup cgroup /sys/fs/cgroup/systemd
+			mkdir -p /run/udev
+			mkdir -p /run/systemd/journal
+			if [ -x /usr/lib/systemd/systemd-udevd ]; then
+				/usr/lib/systemd/systemd-udevd --daemon
+			else
+				/lib/systemd/systemd-udevd --daemon
+			fi
+			udevadm trigger --action=add --type=subsystems
+			udevadm trigger --action=add --type=devices
+		fi
+		sleep 5
+		LogIt "udev started manually" 1
+	fi
+	mkdir -p /dev/.udev/queue/
+	if [ -x /sbin/udevtrigger ]; then
+		/sbin/udevtrigger
+	fi
+	echo "Waiting for udev to discover..."
+	CreateDevMakedev
+	# Newer version use udevadm for that
+	if [ -x /sbin/udevsettle ]; then
+		/sbin/udevsettle --timeout=10
+		LogIt "Discovering with udevsettle"
+	elif [ -x /sbin/udevadm ] || [ -x /usr/bin/udevadm ]; then
+		ua=`UdevadmTrigger`
+		$ua settle --timeout=10
+		LogIt "Discovering with udevadm"
+	fi
+	# It seems we need to have more static devs on some distro were
+	# udev as some other requirements to be covered later on.
+	# So in the mean time:
+	for d in `ls /dev.static`; do
+		if [ ! -e /dev/$d ]; then
+			mv /dev.static/$d /dev
+		fi
+	done
+	echo $PKLVL > /proc/sys/kernel/printk
+}
+
+RstHW() {
+
+	# Restore the HW configuration if available (NOT by default)
+	answer="NO"
+
+	grep -q nohw /proc/cmdline
+	if [ "$?" -eq 0 ]; then
+		return
+	fi
+	if [ -x ./mindi-rsthw ]; then
+		grep -q RESTORE /proc/cmdline
+		if [ "$?" -ne 0 ]; then
+			#clear
+			echo "*********************************************************************"
+			echo "Do you want to restore the HW configuration of the original machine ?"
+			echo "(This may dammage your hardware so be sure to check twice before saying yes)"
+			echo "*********************************************************************"
+			echo "Please confirm by typing YES exactly as written here (NO by default)"
+			echo -n "--> "
+			read answer
+		else
+			answer="YES"
+		fi
+		if [ "$answer" = "YES" ] ; then
+			./mindi-rsthw
+		fi
+	fi
+}
+
+
+StartUSBKbd() {
+# Prepare minimal USB env in case we have USB kbd such as with iLO
+[ -d /proc/bus/usb ] && ! grep -q /proc/bus/usb /proc/mounts && mount -t usbfs none /proc/bus/usb
+echo "$DENY_MODS" | grep -Eq 'uhcd_hci |usbhid |usbcore '
+if [ $? -eq 0 ]; then
+	return
+fi
+modprobe -q uhcd_hci 2> /dev/null
+modprobe -q usbhid 2> /dev/null
+}
+
+
+
+StartLvms() {
+	if [ "`grep -i nolvm /proc/cmdline`" ]; then
+		return;
+	fi
+	if [ -e "/tmp/i-want-my-lvm" ] ; then
+		# Recent LVM need this caching daemon to work
+		LVMETAD=""
+		if [ -x /sbin/lvmetad ]; then
+			LVMETAD="/sbin/lvmetad"
+		fi
+		if [ -x /usr/sbin/lvmetad ]; then
+			LVMETAD="/usr/sbin/lvmetad"
+		fi
+		if [ -x $LVMETAD ]; then
+			mkdir -p /run/lvm
+			$LVMETAD
+		fi
+		LogIt "Scanning LVM's..." 1
+		if which lvm ; then
+			modprobe -q dm-mod 2> /dev/null
+			modprobe -q dm_mod 2> /dev/null
+			lvm vgscan --mknodes
+		else
+			vgscan
+		fi
+
+		# Exclude devices we may not want
+		rm -f /tmp/restorevgs
+		for d in $MINDI_EXCLUDE_DEVS ; do
+			echo "LVM exclusion == $d"
+			# LVM: $4 to be checked if changed
+			EXCLUDE_VGS=`grep " $d" /tmp/i-want-my-lvm | grep vgcreate | awk '{print $4}'`
+			vg=`echo $EXCLUDE_VGS | sed "s/ /|/g"`
+			if [ "$vg" != "" ]; then
+				re=" $d|$vg"
+			else 
+				re=" $d"
+			fi
+			# Remove VGs from i-want-my-lvm
+			grep -Ev "$re" /tmp/i-want-my-lvm > /tmp/i-want-my-lvm.new
+			mv /tmp/i-want-my-lvm.new /tmp/i-want-my-lvm
+			# Prepare  script to restore the VG exluded here if needed
+			for v in $EXCLUDE_VGS; do
+				echo "vgcfgrestore $v" >> /tmp/restorevgs
+				# Remove LVs from mountlist
+				# LVM: sed to be checked if changed
+				EXCLUDE_LVS=`grep " $v" /tmp/i-want-my-lvm | grep lvcreate | sed "s/^.*-n \([^ ][^ ]*\) .*$/$1/"`
+				for l in $EXCLUDE_LVS; do
+					# FIXME: Should search for all possible device names here
+					if [ -f "/tmp/mountlist.txt" ]; then
+						grep -Ev "/dev/$v/$l" /tmp/mountlist.txt > /tmp/mountlist.txt.new
+						grep -Ev "/dev/mapper/${v}-$l" /tmp/mountlist.txt.new > /tmp/mountlist.txt
+					fi
+				done
+			done
+		done
+
+		# LVM: remove #
+		grep -E "^#.*vgchange" /tmp/i-want-my-lvm | sed "s/^#[ ]*//" > /tmp/start-lvm
+		chmod +x /tmp/start-lvm
+		echo -en "Starting LVM's..."
+		/tmp/start-lvm &
+		for i in 1 2 3 4 5 ; do
+			echo -en "."
+			sleep 1
+		done
+		echo "Done."
+	fi
+# If necessary, cannibalize 'analyze-my-lvm'; copy some of its code here,
+# pipe vgscan's output, strip it, run 'vgchange' on its output, etc.etc.
+	LogIt "LVM's have been started."
+}
+
+StartPowerPath() {
+
+	# Taken from the init script of EMC PowerPath on RHEL
+	if [ -f /etc/emcp_devicesDB.dat ]; then 
+		if [ -f /etc/emcp_devicesDB.idx ]; then
+			/etc/opt/emcpower/emcpmgr map -p > /dev/null 2>&1
+		fi
+	fi
+
+	/sbin/powermt config > /dev/null 2>&1
+	#	Wait for udev to finish creating emcpower devices
+	#
+	pdfound=1
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+		pdfound=1
+		for pd in `/bin/ls -d /sys/block/emcpower* 2> /dev/null`; do
+			bpd=`basename $pd`
+			if [ ! -e /dev/$bpd ]; then
+				pdfound=0
+				sleep 2
+				break;
+			fi
+		done
+		if [ "$pdfound" -eq 1 ]; then
+			break
+		fi
+	done
+	if [ "$pdfound" -eq 0 ]; then
+		echo "Unable to start PowerPath"
+	fi
+
+	/sbin/powermt load		> /dev/null 2>&1
+	/etc/opt/emcpower/emcpmgr map	> /dev/null 2>&1
+	/etc/opt/emcpower/powercf -C	> /dev/null 2>&1
+	if [ ! -e /etc/powermt.custom ]; then 
+		/sbin/powermt save		> /dev/null 2>&1
+	fi 
+	/sbin/powermt register	> /dev/null 2>&1
+	/sbin/powermig transition -startup -noprompt	> /dev/null 2>&1
+}
+
+StartMpath() {
+	if [ "`grep -i nompath /proc/cmdline`" ]; then
+		return;
+	fi
+	if [ -f "/tmp/mountlist.txt" ] && [ "`grep mpath /tmp/mountlist.txt`" ]; then
+		if [ -x /sbin/multipath ]; then
+			echo "Starting Mpath..."
+			mkdir -p /var/lib/multipath
+			cat > /etc/multipath.conf << EOF
+defaults {
+        user_friendly_names yes
+}
+EOF
+			/sbin/multipath -v 0
+			if [ -x /sbin/kpartx ]; then
+				/sbin/dmsetup ls --target multipath --exec "/sbin/kpartx -a -p p"
+			fi
+			LogIt "Multipath started"
+		fi
+	fi
+}
+
+StartRaids() {
+	local raid_devices i
+
+	if [ "`grep -i noraid /proc/cmdline`" ]; then
+		return;
+	fi
+
+	if [ -f "/tmp/mountlist.txt" ]; then
+		raid_devices=`grep /dev/md /tmp/mountlist.txt | cut -d' ' -f1`
+	else
+		raid_devices=""
+	fi
+
+	if which raidstart > /dev/null 2> /dev/null ; then
+		for i in $raid_devices ; do
+			if grep `basename $i` /proc/mdstat > /dev/null 2> /dev/null ; then
+		    	LogIt "$i is started already; no need to run 'raidstart $i'" 1
+			else
+	    		LogIt "Running 'raidstart $i'" 1
+	    		raidstart $i
+			fi
+		done
+	elif which mdrun > /dev/null 2> /dev/null ; then
+		if [ "`grep -i nomd /proc/cmdline`" ]; then
+			return;
+		fi
+		LogIt "Running 'mdrun'" 1
+		mdrun
+	elif which mdadm > /dev/null 2> /dev/null ; then
+		if [ "`grep -i nomd /proc/cmdline`" ]; then
+			return;
+		fi
+		LogIt "Running 'mdadm'" 1
+		for i in $raid_devices ; do
+			if grep `basename $i` /proc/mdstat > /dev/null 2> /dev/null ; then
+		    	LogIt "$i is started already; no need to run 'mdadm $i'" 1
+			else
+				if [ -f /etc/mdadm.conf ] ; then
+					LogIt "Running 'mdadm $i' with user supplied /etc/mdadm.conf" 1
+					mdadm -A $i -c /etc/mdadm.conf
+				elif [ -f /etc/mdadm/mdadm.conf ] ; then
+					LogIt "Running 'mdadm $i' with user supplied /etc/mdadm/mdadm.conf" 1
+					mdadm -A $i -c /etc/mdadm/mdadm.conf
+				else
+	    			LogIt "Running 'mdadm $i'" 1
+	    			mdadm -Ac partitions -m dev $i
+				fi
+			fi
+		done
+	elif which dmraid > /dev/null 2> /dev/null ; then
+		if [ "`grep -i nodmraid /proc/cmdline`" ]; then
+			return;
+		fi
+		for x in $(/sbin/dmraid -ay -i -p -t 2>/dev/null | grep -E  -iv "^no " |awk -F ':' '{ print $1 }') ; do
+			echo "Please send the result of /sbin/dmraid -ay -i -p -t to the devteam !!!"
+			return
+			#dmname=$(resolve_dm_name $x)
+			#[ -z "$dmname" ] && continue
+			#/sbin/dmraid  -ay -i -p "$dmname" >/dev/null 2>&1
+			#/sbin/kpartx -a -p p "/dev/mapper/$dmname"
+		done
+	else
+		LogIt "Warning: Neither 'raidstart' nor 'mdrun''found. RAID devices may not have started." 1
+	fi
+
+}
+
+
+TryAgainToFindCD() {
+	local res
+	mount | grep /mnt/cdrom && return 0
+	[ "`grep "backup_media_type" /tmp/mondorestore.cfg 2> /dev/null | grep "cdstream"`" ] && return
+	LogIt "Trying to mount CD-ROM a 2nd time..."
+	find-and-mount-cdrom --second-try
+	res=$?
+	if [ "$res" -eq "0" ] ; then
+		CD_MOUNTED_OK=yes
+		LogIt "CD-ROM drive mounted successfully." 1
+	else
+		LogIt "I still cannot find or mount the CD-ROM drive, by the way."
+	fi
+}
+
+
+
+UseTmpfs()
+{
+	local mount_cmd
+	echo -en "Mounting /tmp/tmpfs..."
+	mkdir -p /tmp/tmpfs
+# For technical reasons, some sets are as large as 16MB.
+# I am allowing 32MB because selective restore occupies a lot of space.
+	for size in 256m 128m 64m 48m 40m 32m ; do
+		mount_cmd="mount /dev/shm -t tmpfs -o size=$size" ; # was 34m until 04/2003
+		LogIt "Trying '$mount_cmd'"
+		$mount_cmd /tmp/tmpfs 2>> $LOGFILE
+		res=$?
+		[ "$res" -eq "0" ] && break
+	done
+	if [ "$res" -ne "0" ] ; then
+		LogIt "Failed. I could not run '$mount_cmd /tmp/tmpfs'. Your kernel is BROKEN or you do not have enough RAM." 1
+		umount /tmp/tmpfs > /dev/null 2> /dev/null
+		rmdir /tmp/tmpfs
+		ln -sf /mnt/RESTORING/tmp /tmp/tmpfs; # used by mondorestore
+		LogIt "Failed to mount /tmp/tmpfs; using ugly softlink instead"
+	else
+		LogIt "Great. Pivot succeeded w/ size=$size" 1
+		echo -en "Pivoting /tmp..."
+		umount /tmp/tmpfs
+		mkdir -p /tmp.old
+		mv /tmp/* /tmp.old/
+		# Try to Deal with a busybox bug on inexistant links
+		cp /tmp/* /tmp.old/ 2> /dev/null
+		rm -f /tmp/*
+		$mount_cmd /tmp
+		mv /tmp.old/* /tmp/ 2> /dev/null
+		# Try to Deal with a busybox bug on inexistant links
+		cp /tmp.old/* /tmp/ 2> /dev/null
+		rm -rf /tmp.old
+		mkdir -p /tmp/tmpfs
+		mkdir -p $GROOVY
+	echo "Done."
+	LogIt "Successfully mounted dynamic /tmp ramdisk"
+#	mkdir -p /tmp/tmpfs/var
+#        mv -f /var/log /tmp/tmpfs/var/log
+#        ln -sf /tmp/tmpfs/var/log /var/log
+	fi
+}
+
+
+WelcomeMessage()
+{
+	echo "********************************************************************"
+	echo "MINDI-LINUX by Mondo Dev Team - web site: http://www.mondorescue.org"
+	echo "Boot disk based on AlfaLinux & Trinux. BusyBox by Erik Andersen."
+which petris > /dev/null 2> /dev/null && echo "Petris was written by Peter Seidler <p.seidler@mail1.stofanet.dk>."
+	echo "Executables and source code are covered by the GNU GPL. No warranty."
+	echo "running on $ARCH"
+	echo "********************************************************************"
+}
+
+EnableCcissIfAppropriate() {
+	local f
+
+	# In some cases, the OBDR tape remains in CD-ROM mode. This branch solves that issue (#498)
+	if [ "`grep -i 'obdr ' /tmp/mondorestore.cfg 2>/dev/null`" ] && [ -x /usr/bin/hpsa_obdr_mode ]; then
+		for lun in `/usr/bin/hpsa_obdr_mode -m query /dev/cciss/* 2>&1 | grep "is an OBDR device" | cut -d' ' -f4`; do
+			/usr/bin/hpsa_obdr_mode -m query -l $lun /dev/cciss/* 2>&1 | grep -q "is in CD-ROM mode"
+			if [ $? -eq 0 ]; then
+				# This tape/lun should be brought back in Sequential mode
+				LogIt "Putting back tape $lun in Sequential mode..."
+				/usr/bin/hpsa_obdr_mode -m tape -l $lun /dev/cciss/* 2>&1 > /dev/null
+			fi
+		done
+	fi
+
+	# Now engage all Smart Array controllers to detect attached devices
+	if [ -d  "/proc/driver/cciss" ]; then
+		for f in /proc/driver/cciss/cciss* ; do
+	    	LogIt "Engaging $f"
+	    	echo "engage scsi" > $f
+	    	LogIt "...result=$?"
+		done
+	fi
+}
+
+ModprobeAllModules() {
+
+	echo "Searching for modules to install..."
+	if [ ! -e /tmp/modules ]; then
+		LogIt "Unable to find the modules list. Computing one. This may take some time..."
+		lismod=`find /lib/modules -name '*\.ko*' -o -name '*\.o*'`
+		for m in $lismod; do
+			k=`basename $m | sed 's/\.ko.*$//'`
+			j=`basename $k | sed 's/\.o.*$//'`
+			echo "$j" >> /tmp/modules
+		done
+	fi
+	# loading forced modules first
+	for j in `cat /tmp/modules`; do
+		echo "$FORCE_MODS" | grep -q "$j "
+		if [ $? -eq 0 ]; then
+			echo "Forcing first $j..."
+			modprobe -q $j 2> /dev/null
+		fi
+	done
+	for j in `cat /tmp/modules`; do
+		echo "$DENY_MODS" | grep -q "$j "
+		if [ $? -eq 0 ]; then
+			echo "Denying $j..."
+			continue
+		fi
+		echo "$FORCE_MODS" | grep -q "$j "
+		if [ $? -eq 0 ]; then
+			continue
+		fi
+		echo "Probing $j..."
+		modprobe -q $j 2> /dev/null
+	done
+}
+
+UdevadmTrigger() {
+
+# This function should just echo the return value $ua
+
+if [ -x /sbin/udevadm ]; then
+	ua="/sbin/udevadm"
+elif [ -x /usr/bin/udevadm ]; then
+	ua="/usr/bin/udevadm"
+else
+	LogIt "WARNING: Unable to find udevadm. Not triggering udev"
+	ua="/bin/true"
+fi
+
+v="`$ua --version`"
+
+if [ -x "$v" ]; then
+	LogIt "Triggering udev again..."
+	if [ "$v" -ge "146" -a "$v" -lt "174" ]; then
+		$ua trigger --type=failed
+	elif [ "$v" -lt "146" ]; then
+		$ua trigger --retry-failed
+	else
+		LogIt "... not needed"
+	fi
+fi
+echo $ua
+}
+
+ExtractDataDisksAndLoadModules() {
+	LogIt "Installing additional tools ..." 1
+	# TODO: test return value
+	install-additional-tools
+
+	# Retry failed udev events now that local filesystems are mounted read-write
+	# (useful for rules creating network ifcfg files)
+	if [ -e "/tmp/USE-UDEV" ] ; then
+		ua=`UdevadmTrigger`
+	fi
+}
+
+# ------------------------ main -----------------------
+
+MINDI_VER=3.0.2
+MINDI_REV=3578
+trap CaughtSoftReset SIGTERM
+trap GetShell SIGINT
+LOGFILE=/var/log/mondorestore.log
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin:/mondo:/usr/games
+GROOVY=/tmp/groovy-stuff
+USER=root
+ARCH=`uname -m`
+
+export PATH GROOVY USER LOGFILE ARCH
+
+mount -o remount,rw /
+rm -f $LOGFILE
+
+mkdir /proc 2> /dev/null
+mount /proc /proc -t proc
+
+# Creates log file
+LogIt ""
+# Backup fd
+exec 4>&2 5>&1
+# Redirect every message to the LOGFILE
+exec > >(tee -a ${LOGFILE})
+exec 2> >(tee -a ${LOGFILE} >&2)
+
+echo "Welcome to init (from mindi ${MINDI_VER}-r${MINDI_REV})"
+
+mkdir /sys 2> /dev/null
+mount /sys /sys -t sysfs
+
+[ ! "$GROOVY" ] && Die "I'm not groovy!"
+for i in $GROOVY /mnt/cdrom /mnt/isodir /var/local/petris /tmp/isodir; do
+	mkdir -p $i
+done
+# For ESX 3
+[ -d /proc/vmware ] && ! grep -q /vmfs /proc/mounts && mount -t vmfs /vmfs /vmfs
+
+if [ "`grep -i denymods /proc/cmdline`" ]; then
+	export DENY_MODS="`cat /proc/cmdline | sed 's~.*denymods=\"\(.*\)\".*~\1~'` mondonone"
+else
+	export DENY_MODS=" "
+fi
+if [ "`grep -i 'obdr ' /tmp/mondorestore.cfg 2> /dev/null`" ]; then
+	# Do not try to load usb storage when dealing with OBDR it makes the modprobe hang :-(
+	export DENY_MODS="usb-storage $DENY_MODS"
+fi
+if [ "`grep -i forcemods /proc/cmdline`" ]; then
+	export FORCE_MODS="`cat /proc/cmdline | sed 's~.*forcemods=\"\(.*\)\".*~\1~'` mondonone"
+else
+	export FORCE_MODS=" "
+fi
+echo "Activating a potential USB keyboard/mouse"
+StartUSBKbd
+
+if [ -f /proc/sys/kernel/exec-shield ]; then
+	echo 0 > /proc/sys/kernel/exec-shield 2>> /dev/null
+fi
+
+if [ -f /proc/modules ]; then
+	echo "/sbin/modprobe" > /proc/sys/kernel/modprobe
+fi
+
+if [ -e "/tmp/USE-UDEV" ] ; then
+	RunUdevd
+fi
+ExtractDevTarballs
+LaunchTerminals
+
+# Keeping kernel silent for module insertion
+PKLVL=`cut -f1 /proc/sys/kernel/printk`
+echo 0 > /proc/sys/kernel/printk
+ModprobeAllModules
+echo $PKLVL > /proc/sys/kernel/printk
+
+EnableCcissIfAppropriate
+#-------------------------------
+#WHOLIVESINAPINEAPPLEUNDERTHESEA#;# --- don't touch this :)
+#-------------------------------
+UseTmpfs
+if [ ! -e "/tmp/mondorestore.cfg" ] ; then
+	LogIt "WARNING: /tmp/mondorestore.cfg not found - forging an empty one"
+	LogIt "         Hopefully this is a Mindi media"
+	touch /tmp/mondorestore.cfg
+fi
+if [ "`grep -i pxe /proc/cmdline`" ] || [ "`grep -i net /proc/cmdline`" ] || [ "`grep 'netfs-proto ' /tmp/mondorestore.cfg`" ]; then
+	# We need to get here exported variables from start-netfs
+	. /usr/sbin/start-netfs
+fi
+
+if [ "`grep -i 'obdr ' /tmp/mondorestore.cfg 2>/dev/null`" ] || [ "`grep -i ' udev' /tmp/mondorestore.cfg 2>/dev/null`" ]; then
+	HandleTape
+	ExtractDataDisksAndLoadModules
+elif [ "`grep -i pxe /proc/cmdline`" ]; then
+	# Simulate a local CD
+	echo "/mnt/cdrom" > /tmp/CDROM-LIVES-HERE
+	CD_MOUNTED_OK=yes
+	ExtractDataDisksAndLoadModules
+	# Fake the conf file to force it to NFS mode, even if we made originally a CD (mandatory for mondorestore to work correctly)
+	sed -i "s/backup-media-type.*/backup-media-type netfs/" /tmp/mondorestore.cfg
+elif [ "`grep -i usb= /proc/cmdline`" ] || [ "`grep -i usb /tmp/mondorestore.cfg 2>/dev/null | grep media-type`" ]; then
+	. /usr/sbin/start-usb
+
+	# Simulate a local CD
+	echo "/mnt/cdrom" > /tmp/CDROM-LIVES-HERE
+	CD_MOUNTED_OK=yes
+	ExtractDataDisksAndLoadModules
+else
+	HandleCDROM
+	ExtractDataDisksAndLoadModules
+fi
+res=$?
+ConfigureLoggingDaemons
+if [ -e "/tmp/USE-DEVFS" ] ; then
+	umount -d /mnt/cdrom 2> /dev/null
+	mv /dev/cdrom /cdrom.lnk 2> /dev/null
+	CD_MOUNTED_OK=""
+	RunDevfsd
+fi
+
+if [ "`grep -i excludedevs /proc/cmdline`" ]; then
+	export MINDI_EXCLUDE_DEVS="`cat /proc/cmdline | sed 's~.*excludedevs=\"\(.*\)\".*~\1~'` mondonone"
+	for d in $MINDI_EXCLUDE_DEVS ; do
+		echo "Mountlist exclusion == $d"
+		if [ -e "/tmp/mountlist.txt" ]; then
+			perl -i -ne 'print $_ unless m~$d~' /tmp/mountlist.txt
+		fi
+	done
+else
+	export MINDI_EXCLUDE_DEVS=" "
+fi
+
+LoadKeymap
+WelcomeMessage
+RstHW
+echo "Starting potential Raid/Multipath ..."
+[ -e "/tmp/mountlist.txt" ] && cp -f /tmp/mountlist.txt /tmp/mountlist.original
+PauseForRaids
+StartRaids
+StartMpath
+StartLvms
+CopyBootDevEntry
+mkdir -p /tmp/tmpfs
+sleep 2
+#clear
+if [ -e "/dev/md0" ] && [ ! -e "/dev/md/0" ] && [ -e "/tmp/mountlist.txt" ] && [ "`grep /dev/md/ /tmp/mountlist.txt`" != "" ] ; then
+	LogIt "Creating /dev/md/* softlinks just in case." 1
+	mkdir -p /dev/md
+	cp -af /dev/md0 /dev/md/0 2> /dev/null
+	cp -af /dev/md1 /dev/md/1 2> /dev/null
+	cp -af /dev/md2 /dev/md/2 2> /dev/null
+fi
+
+if ! [ "`grep -i "pxe" /proc/cmdline`" ] ; then
+	res="`cat /mnt/cdrom/archives/THIS-CD-NUMBER 2> /dev/null`"
+	[ "$res" != "1" ] && [ "$res" != "" ] && Die "This is CD #$res in the series. Please insert CD #1."
+	[ -e "/cdrom.lnk" ] && mv -f /cdrom.lnk /dev/cdrom && mount /dev/cdrom /mnt/cdrom && CD_MOUNTED_OK=yes
+	[ "$CD_MOUNTED_OK" != "yes" ] && TryAgainToFindCD
+	#mount | grep cdrom > /dev/null 2> /dev/null || mount /dev/cdrom /mnt/cdrom >> $LOGFILE 2>> $LOGFILE
+fi
+hack-cfg-if-necessary || LogIt "Cannot find hack-cfg-if-necessary"
+
+# Log some useful info
+LogIt "init (from mindi v$MINDI_VER-r${MINDI_REV})"
+LogIt "/proc/cmdline is:"
+LogIt "----------"
+cat /proc/cmdline  >> $LOGFILE
+LogIt "----------"
+LogIt "df result:"
+LogIt "----------"
+df >> $LOGFILE
+LogIt "-------------"
+LogIt "mount result:"
+LogIt "-------------"
+mount >> $LOGFILE
+LogIt "-------------"
+LogIt "lsmod result:"
+LogIt "-------------"
+lsmod >> $LOGFILE
+LogIt "-------------"
+LogIt "dmesg result:"
+LogIt "-------------"
+dmesg >> $LOGFILE
+LogIt "-------------"
+LogIt "/proc/mdstat:" >> $LOGFILE
+LogIt "-------------"
+cat /proc/mdstat  >> $LOGFILE
+LogIt "-------------"
+LogIt "/proc/swaps:" >> $LOGFILE
+LogIt "-------------"
+cat /proc/swaps  >> $LOGFILE
+LogIt "-------------"
+LogIt "/proc/filesystems:" >> $LOGFILE
+LogIt "-------------"
+cat /proc/filesystems  >> $LOGFILE
+LogIt "-------------"
+LogIt "/proc/partitions:" >> $LOGFILE
+LogIt "-------------"
+cat /proc/partitions  >> $LOGFILE
+LogIt "-------------"
+LogIt "fdisk result:" >> $LOGFILE
+LogIt "-------------"
+fdisk -l  >> $LOGFILE
+LogIt "-------------"
+if [ -f /tmp/mondorestore.cfg ]; then
+	LogIt "/tmp/mondorestore.cfg result:" >> $LOGFILE
+	LogIt "-------------"
+	cat /tmp/mondorestore.cfg  >> $LOGFILE
+fi
+
+ide-opt
+
+#ctrlaltdel soft
+for i in null stdout stdin stderr ; do
+	cp -af /dev/$i /tmp
+done
+# Not sure it's still needed, but shouldn't hurt
+if [ -e "/tmp/USE-UDEV" ] ; then
+	ua=`UdevadmTrigger`
+fi
+if grep "backup-media-type" /tmp/mondorestore.cfg > /dev/null 2> /dev/null ; then
+	LogIt "backup-media-type is specified in config file - great."
+	LogIt "Calling post-init"
+	# start-netfs moved it under /tmp as the NFS share is already unmounted 
+	if [ _"$pre" != _"" ] && [ "`echo $pre | grep -E '^/tmp/isodir'`" ]; then
+		pre=`echo $pre | sed 's|^/tmp/isodir|/tmp|'`
+	fi
+	if [ _"$pre" != _"" ] && [ -x $pre ]; then
+		echo "Executing preliminary script $pre"
+		LogIt "Executing preliminary script $pre"
+		$pre
+	fi
+	post-init
+else
+	LogIt "backup-media-type is not specified in config file."
+	LogIt "I think this media has no archives on it."
+fi
+if [ "`grep -i "post=" /proc/cmdline`" ] ; then
+	for i in `cat /proc/cmdline` ; do
+		echo $i | grep -qi post= && post=`echo $i | cut -d= -f2`
+	done
+	# start-netfs moved it under /tmp as the NFS share is already unmounted 
+	if [ "`echo $post | grep -E '^/tmp/isodir'`" ]; then
+		post=`echo $post | sed 's|^/tmp/isodir|/tmp|'`
+	fi
+	if [ -r $post ]; then
+		echo "Executing final script $post"
+		LogIt "Executing final script $post"
+		if [ "`echo $post | grep -E '^/mnt/RESTORING'`" ]; then
+			mr-mount-me
+		fi
+		chmod 755 $post
+		$post
+		if [ "`echo $post | grep -E '^/mnt/RESTORING'`" ]; then
+			mr-unmount-me
+		fi
+	fi
+fi
+if grep "RESTORE" /proc/cmdline > /dev/null 2> /dev/null ; then
+	echo "Rebooting in 10 seconds automatically as per reboot order"
+	echo -en "Press ^C to interrupt if you have to ..."
+	for i in 1 2 3 4 5 6 7 8 9 10 ; do
+		sleep 1
+		echo -en "."
+	done
+	echo "Boom."
+	sleep 1
+else
+	GetShell
+fi
+CaughtSoftReset

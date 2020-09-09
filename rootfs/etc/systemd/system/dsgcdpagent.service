@@ -1,0 +1,12 @@
+[Unit]
+Description=Dsg cdp agent service
+After=systemd-remount-fs.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/dsgcdpagent/start.sh
+ExecStop=/home/dsgcdpagent/stop.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

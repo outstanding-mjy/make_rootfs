@@ -1,0 +1,5 @@
+# Soft dependencies extracted from modules themselves.
+softdep ipmi_msghandler post: ipmi_devintf
+softdep vfio post: vfio_iommu_type1 vfio_iommu_spapr_tce
+softdep mdev post: vfio_mdev
+softdep crc_t10dif pre: crct10dif

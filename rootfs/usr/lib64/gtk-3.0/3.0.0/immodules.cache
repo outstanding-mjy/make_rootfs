@@ -1,0 +1,12 @@
+# GTK+ Input Method Modules file
+# Automatically generated file, do not edit
+# Created by gtk-query-immodules-3.0-64 from gtk+-3.22.10
+#
+# ModulesPath = /usr/lib64/gtk-3.0/3.0.0/x86_64-redhat-linux-gnu/immodules:/usr/lib64/gtk-3.0/3.0.0/immodules:/usr/lib64/gtk-3.0/x86_64-redhat-linux-gnu/immodules:/usr/lib64/gtk-3.0/immodules
+#
+"/usr/lib64/gtk-3.0/3.0.0/immodules/im-ibus.so" 
+"ibus" "IBus (Intelligent Input Bus)" "ibus" "" "ja:ko:zh:*" 
+
+"/usr/lib64/gtk-3.0/3.0.0/immodules/im-xim.so" 
+"xim" "X Input Method" "gtk30" "/usr/share/locale" "ko:ja:th:zh" 
+

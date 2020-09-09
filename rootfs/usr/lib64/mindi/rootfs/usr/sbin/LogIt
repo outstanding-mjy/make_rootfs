@@ -1,0 +1,65 @@
+#!/bin/sh
+#
+# $Id: LogIt 3216 2013-12-30 09:46:14Z bruno $
+#
+
+currdate="`date '+%H:%M'`"
+
+if [ _"$LOGFILE" = _"" ]; then
+	echo "LOGFILE was undefined. Using /tmp/mondorestore2.log"
+	LOGFILE="/tmp/mondorestore2.log"
+fi
+
+if [ ! -e "$LOGFILE" ] ; then
+	echo "Start of Restore" > $LOGFILE
+	echo "----------------" >> $LOGFILE
+	echo "Date: `date`" >> $LOGFILE
+	echo "----------------" >> $LOGFILE
+	if [ "`grep -i quiet /proc/cmdline`" ]; then
+		echo "QUIET mode activated. Only error msgs are printed" >> $LOGFILE
+		echo "----------------" >> $LOGFILE
+	fi
+fi
+
+# LogIt $phrase ------ log only
+# LogIt $phrase 1 ---- log & display
+# LogIt $phrase 2 ---- log & display w/o LF
+# LogIt $prhase 3 ---- log & display, blanking the current screen line
+#                      before displaying message _with_ LF
+# LogIt $phrase 9 ---- log IF --verbose is ON
+
+if [ "$#" = "1" ] ; then
+	echo -e "$currdate $1" >> $LOGFILE
+elif [ "$#" = "2" ] ; then
+	if [ "$2" = "0" ] ; then
+		echo -e "$currdate $1" >> $LOGFILE
+	elif [ "$2" = "1" ] ; then
+		if [ ! "`grep -i quiet /proc/cmdline`" ]; then
+			echo -e "$1"
+		fi
+		echo -e "$currdate $1" >> $LOGFILE
+	elif [ "$2" = "2" ] ; then
+		if [ ! "`grep -i quiet /proc/cmdline`" ]; then
+			echo -e -n "                                                                                \r$1\r"
+		fi
+		echo -e "$currdate $1" >> $LOGFILE
+	elif [ "$2" = "3" ] ; then
+		if [ ! "`grep -i quiet /proc/cmdline`" ]; then
+			echo -e -n "                                                                                \r$1\n"
+		fi
+		echo -e "$currdate $1" >> $LOGFILE
+	elif [ "$2" = "9" ] ; then
+		if [ "$DEBUGGING" = "yes" ] ; then
+	    	echo -e "$currdate $1" >> $LOGFILE
+		fi
+	else
+		LogIt "LogIt '$1' '$2' .. unknown 2nd param"
+	    exit 1
+	fi
+else
+	LogIt "LogIt '$1' .. silly params"
+	exit 1
+fi
+
+
+exit 0

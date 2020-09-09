@@ -1,0 +1,27 @@
+#!/bin/sh
+#
+# Startup Petris
+#
+
+# Say what we are doing
+echo -n "Waiting for petris"
+# Wait for the libraries to become available...
+while   [ ! -f /lib/libncurses.so.5 ] ; do
+  echo -n "."
+  sleep 2
+done
+sleep 2
+# ...then wait for petris
+which petris > /dev/null
+while [ $? -ne 0 ] ; do
+  echo -n "."
+  sleep 1
+  which petris > /dev/null
+done
+# Keep running petris until it's killed or crashes
+while [ 0 -eq 0 ] ; do
+    clear
+    sleep 1
+    petris
+done
+exit 0

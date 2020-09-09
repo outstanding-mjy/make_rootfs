@@ -1,0 +1,83 @@
+#!/bin/sh
+#
+# $Id: install-additional-tools 3216 2013-12-30 09:46:14Z bruno $
+#
+########################################################################
+
+
+# ------------ main -----------
+
+# if the file '/tmp/CDROM-LIVES-HERE' exists then we should use the CD
+
+LogIt "Starting install-additional-tools"
+
+if [ ! "$GROOVY" ] ; then
+	LogIt "I'm not groovy!"
+	exit 1
+fi
+
+mountdir=$GROOVY
+
+if [ $mountdir = "/" ]; then
+	LogIt "mountdir shouldn't be /"
+	exit 1
+fi
+
+# Should be the same as in mindi => conf param
+mkdir -p $mountdir
+res=0
+if [ -e "/tmp/TAPEDEV-HAS-DATA-DISKS" ] ; then
+    LogIt "I am assuming the data disks' contents are already in $mountdir."
+else
+	LogIt "PLEASE WAIT. Untarring data content" 2
+
+	mountpoint=/dev/null
+	[ -e "/tmp/CDROM-LIVES-HERE" ] && mountpoint=/mnt/cdrom/images
+	tarball=$mountpoint/all.tar.gz
+	if [ -e "/tmp/CDROM-LIVES-HERE" ] ; then
+    	[ -e "$tarball" ] || LogIt "Can't find CD's $tarball" 1
+	fi
+
+	old_pwd=`pwd`
+	cd $mountdir
+	counter=0
+	for fname in `tar -zxvf $tarball` ; do
+   	 counter=$(($counter+1))
+    	[ "$(($counter % 4))" -eq "0" ] && echo -en "\r\t\t\t\t\t\t\t\\"
+    	[ "$(($counter % 4))" -eq "1" ] && echo -en "\r\t\t\t\t\t\t\t|"
+    	[ "$(($counter % 4))" -eq "2" ] && echo -en "\r\t\t\t\t\t\t\t/"
+    	[ "$(($counter % 4))" -eq "3" ] && echo -en "\r\t\t\t\t\t\t\t-"
+	done
+	cd $old_pwd
+	echo -e -n "\r"
+	[ ! -e "/tmp/CDROM-LIVES-HERE" ] && umount -d $mountpoint
+	sleep 1
+fi
+
+LogIt "Populating / with tar file content..." 1
+
+cd $mountdir
+if [ -f etc/fstab ]; then
+	cp etc/fstab /tmp
+fi
+if [ -f etc/raidtab ]; then
+	cp etc/raidtab /tmp
+fi
+
+liste=`ls`
+if [ "$liste" ]; then
+	LogIt "Installing and removing $liste"
+	tar cf - $liste | (cd / ; tar xf -)
+	rm -fr $liste
+fi
+cd /
+
+sync;sync;sync
+
+LogIt "Done." 1
+
+which gawk 2> /dev/null > /dev/null
+[ "$?" -ne "0" ] && which awk 2> /dev/null > /dev/null && ln -sf `which awk` /usr/bin/gawk
+
+LogIt "Exiting install-additional-tools"
+exit 0

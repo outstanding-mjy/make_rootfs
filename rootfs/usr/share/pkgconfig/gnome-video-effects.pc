@@ -1,0 +1,7 @@
+prefix = /usr
+datarootdir = ${prefix}/share
+effectsdir = ${datarootdir}/gnome-video-effects
+
+Name: gnome-video-effects
+Description: A collection of GStreamer effects to be used in different GNOME Modules
+Version: 0.4.3

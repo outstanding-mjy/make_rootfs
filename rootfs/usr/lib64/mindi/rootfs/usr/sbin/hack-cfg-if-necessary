@@ -1,0 +1,26 @@
+#!/bin/sh
+#
+# $Id: hack-cfg-if-necessary 3271 2014-04-29 19:23:09Z bruno $
+#
+
+if ! mount | grep cdrom ; then 
+    LogIt "CD-ROM is not mounted. Darn."
+    exit 0
+fi
+
+if ! ls /mnt/cdrom/archives/* > /dev/null 2> /dev/null ; then
+    LogIt "Can't find /mnt/cdrom/archives; darn."
+    exit 0
+fi
+
+LogIt "OK, we've found /mnt/cdrom/archives/*; great."
+
+if ! grep "backup-media-type iso" /tmp/mondorestore.cfg 2> /dev/null ; then
+    LogIt "Config file is fine, BTW."
+    exit 0
+fi
+
+LogIt "Re-jigging mondorestore.cfg because you backed up to ISOs and then burned them to CDs" 1
+sed -i 's/backup-media-type iso/backup-media-type cdr/' /tmp/mondorestore.cfg
+LogIt "Done re-jigging. Yay."
+exit 0

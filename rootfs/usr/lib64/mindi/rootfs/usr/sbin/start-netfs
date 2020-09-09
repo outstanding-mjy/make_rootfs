@@ -1,0 +1,174 @@
+#!/bin/sh
+#
+# $Id$
+#
+# This script sets up the network + Network FS environment if needed.
+#
+
+
+# number of ping
+ipcount=3
+
+# Get info from config file
+ipdev=`grep netfs-dev /tmp/mondorestore.cfg 2> /dev/null | cut -d' ' -f2-`
+# MAC address in uppercases
+hwaddr=`grep netfs-client-hwaddr /tmp/mondorestore.cfg 2> /dev/null | cut -d' ' -f2- | tr '[a-z]' '[A-Z]'`
+ipaddress=`grep netfs-client-ipaddr /tmp/mondorestore.cfg 2> /dev/null | cut -d' ' -f2-`
+ipnetmask=`grep netfs-client-netmask /tmp/mondorestore.cfg 2> /dev/null | cut -d' ' -f2-`
+ipbroadcast=`grep netfs-client-broadcast /tmp/mondorestore.cfg 2> /dev/null | cut -d' ' -f2-`
+ipgateway=`grep netfs-client-defgw /tmp/mondorestore.cfg 2> /dev/null | cut -d' ' -f2-`
+proto=`grep netfs-proto /tmp/mondorestore.cfg 2> /dev/null | cut -d' ' -f2-`
+iproute=`grep netfs-route /tmp/mondorestore.cfg 2> /dev/null | cut -d' ' -f2-`
+ipconf=""
+ipmode="STATIC"
+pre=""
+post=""
+export netfsmount=`grep netfs-server-mount /tmp/mondorestore.cfg 2> /dev/null | cut -d' ' -f2-`
+export imgname=`grep iso-prefix /tmp/mondorestore.cfg 2> /dev/null | cut -d' ' -f2-`
+if [ "$imgname" = "" ]; then
+	export imgname="mondorescue"
+fi
+export dirimg=`grep iso-dir /tmp/mondorestore.cfg 2> /dev/null | cut -d' ' -f2-`
+if [ "$dirimg" = "" ]; then
+	export dirimg="/"
+fi
+
+# info from cmdline are predominent
+for i in `cat /proc/cmdline` ; do
+	echo $i | grep -qi ping= && ipcount=`echo $i | cut -d= -f2`
+	echo $i | grep -qi hwaddr= && hwaddr=`echo $i | cut -d= -f2  | tr '[a-z]' '[A-Z]'`
+	echo $i | grep -qi ipconf= && ipconf=`echo $i | cut -d= -f2`
+	echo $i | grep -qi netfsmount= && export netfsmount=`echo $i | cut -d= -f2`
+	echo $i | grep -qi netfsopt= && export netfsopt=`echo $i | cut -d= -f2`
+	echo $i | grep -qi prefix= && export imgname=`echo $i | cut -d= -f2`
+	echo $i | grep -qi netfspath= && export dirimg=`echo $i | cut -d= -f2`
+	echo $i | grep -qi pre= && pre=`echo $i | cut -d= -f2`
+	echo $i | grep -qi post= && post=`echo $i | cut -d= -f2`
+	echo $i | grep -qi proto= && proto=`echo $i | cut -d= -f2`
+	echo $i | grep -qi iproute= && iproute=`echo $i | cut -d= -f2`
+	echo $i | grep -qi ipmode= && ipmode=`echo $i | cut -d= -f2`
+done
+
+if [ "$ipdev" != "" ] || [ "$ipconf" != "" ]; then
+	# Network configuration stored during archive
+	# or on cmdline so network wanted => starting it
+	LogIt "INFO: Starting Network..."
+
+	# Activate loobback
+	ifconfig lo 127.0.0.1
+
+	# ipconf has priority
+	if [ "$ipconf" != "" ]; then
+		echo "$ipconf" | grep -q "dhcp"
+		if [ $? -eq 0 ]; then
+			ipdev=`echo $ipconf | cut -d: -f1`
+			ipmode="DHCP"
+		else
+			ipdev=`echo $ipconf | cut -d: -f1`
+			ipaddress=`echo $ipconf | cut -d: -f2`
+			ipnetmask=`echo $ipconf | cut -d: -f3`
+			ipbroadcast=`echo $ipconf | cut -d: -f4`
+			ipgateway=`echo $ipconf | cut -d: -f5`
+		fi
+	else
+		# Now relying on ipdev which isn't empty
+		# ipmode is either STATIC by default or DHCP if a parameter was passed
+		# If same system, map to the right MAC address
+
+		# Look at our previous device
+		hwaddr_found=`ifconfig $ipdev 2> /dev/null | grep HWaddr | awk '{print $NF}' | tr '[a-z]' '[A-Z]'`
+		if [ "$hwaddr_found" != "" ]; then
+			# That device always exists
+			if [ "$hwaddr" = "$hwaddr_found" ]; then
+				# No renaming took place use it
+				LogIt "INFO: Using device $ipdev (Mac Addr: $hwaddr_found)"
+			fi
+		else
+			# maybe there was a change of NIC numbering e.g. 
+			# and the one used at backup doesn't exist anymore
+			# ipdev is not good anymore probably
+			oldipdev=$ipdev
+
+			for hwdev in `ifconfig -a | grep HWaddr | awk '{print $1}'` ; do
+				mac=`ifconfig $hwdev | grep HWaddr | awk '{print $NF}' | tr '[a-z]' '[A-Z]'`
+				if [ "$hwaddr" = "$mac" ]; then
+					# This is the new device for the MAC address of our card at backup time
+					LogIt "INFO: Interface with MAC address $hwaddr changed from $ipdev to $hwdev"
+					LogIt "INFO: Using $hwdev for network configuration from now on"
+					ipdev=$hwdev
+					break
+				fi
+			done
+
+			if [ "$oldipdev" = "$ipdev" ]; then
+				# We didn't find a new device for this MAC and it doesn't exist
+				# Take the first interface and hope it's good
+				ipdev=`ifconfig -a | grep HWaddr | awk '{print $1}' | head -1`
+				LogIt "WARN: Using $ipdev as no device matches the MAC address $hwaddr"
+			fi
+		fi
+	fi
+
+	if [ "$ipmode" = "DHCP" ]; then
+		LogIt "INFO: Making DHCP request on $ipdev"
+		udhcpc -i $ipdev
+	else
+		LogIt "INFO: Configuring $ipdev statically ($ipaddress/$ipnetmask/$ipgateway)"
+		ifconfig $ipdev $ipaddress netmask $ipnetmask broadcast $ipbroadcast
+		route add default gw $ipgateway
+	fi
+	# Leave time to the stack to wake up (reported by some users)
+	sleep 5
+
+	# Handle a potential static route
+	if [ _"$iproute" != _"" ]; then
+		iproute=`echo $iproute | sed -i 's/:/ /g'`
+		LogIt "INFO: Adding static route with route add $iproute"
+		route add $iproute
+	fi
+
+	# ping server helps waking interface up
+	LogIt "INFO: Pinging Remote server..."
+	netfs_server_ipaddr=`echo $netfsmount | cut -d: -f1 | cut -d@ -f2`
+	ping -c $ipcount $netfs_server_ipaddr 
+
+	# Which is our protocol for file sharing
+	if [ "$proto" = "" ]; then
+		LogIt "WARN: No protocol specified, defaulting to NFS"
+		proto="nfs"
+	fi
+
+	if [ "$proto" = "sshfs" ]; then
+		LogIt "INFO: Mounting SSHFS share ($netfsmount) on /tmp/isodir..."
+		# We need a correct console for ssh
+		ln -sf /dev/console /dev/tty
+		sshfs -o ro,StrictHostKeyChecking=no $netfsopt $netfsmount /tmp/isodir
+	elif [ "$proto" = "smbfs" ]; then
+		LogIt "INFO: Mounting SMBFS share ($netfsmount) on /tmp/isodir..."
+		mount -t cifs $netfsmount /tmp/isodir -o ro $netfsopt 
+	elif [ "$proto" != "" ]; then
+		if [ -x /sbin/rpcbind ]; then
+			echo "Starting rpcbind daemon..."
+			mkdir -p /var/cache/rpcbind /var/lib/rpcbind
+			/sbin/rpcbind -w &
+		fi
+		LogIt "INFO: Mounting Network share ($netfsmount) on /tmp/isodir..."
+		touch /etc/mtab
+		mount -t $proto -o nolock,ro $netfsopt $netfsmount /tmp/isodir
+	else
+		LogIt "ERROR: Unknown protocol $proto"
+	fi
+	
+	LogIt "INFO: Mounting Remote image ${imgname}-1.iso in $dirimg on /mnt/cdrom in loopback"
+	mount -o ro,loop -t iso9660 /tmp/isodir/$dirimg/${imgname}-1.iso /mnt/cdrom
+
+	# Save the scripts on the Network share locally
+	if [ "`echo $pre | grep -E '^/tmp/isodir'`" ]; then
+		cp $pre /tmp
+		LogIt "INFO: Copying $pre under /tmp"
+	fi
+	if [ "`echo $post | grep -E '^/tmp/isodir'`" ]; then
+		cp $post /tmp
+		LogIt "INFO: Copying $post under /tmp"
+	fi
+fi

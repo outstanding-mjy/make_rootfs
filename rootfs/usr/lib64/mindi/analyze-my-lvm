@@ -1,0 +1,483 @@
+#!/bin/bash
+#
+# $Id: analyze-my-lvm 3559 2016-04-11 10:45:32Z bruno $
+#
+
+Die() {
+	echo "$1" >> /dev/stderr
+	exit -1
+}
+
+
+
+GetValueFromField() {
+	local res
+	grep -i "$2" "$1" | perl -p -e 's/\s*(.*)\s\s\s+(.+)$/$2/;s/\sT[i]*B/t/;s/\sG[i]*B/g/;s/\sM[i]*B/m/;s/\sK[i]*B/k/'
+}
+
+
+GetLastBit() {
+	local i res
+	i=20
+	res=""
+	while [ ! "$res" ] ; do
+		i=$(($i-1))
+		res=`echo "$1" | cut -d'/' -f$i`
+	done
+	echo "$res"
+}
+
+
+ProcessLogicalVolume() {
+	local LV_full_string fname logical_volume volume_group device
+	LV_full_string=$1
+	if [ ! -e "$1" ]; then
+		echo "WARNING - cannot find LV file $1" | tee -a /dev/stderr
+		return
+	fi
+	volume_group=`echo "$LV_full_string" | cut -d'/' -f3`
+	logical_volume=`echo "$LV_full_string" | cut -d'/' -f4`
+	if [ $lvmversion = 2 ]; then
+		device=$LV_full_string
+		params=`GenerateLvcreateParameters $device`
+	else
+		fname=/proc/lvm/VGs/$volume_group/LVs/$logical_volume
+		if [ ! -e "$fname" ] ; then
+			echo "WARNING - cannot find $volume_group's $logical_volume LV file" | tee -a /dev/stderr
+			return
+		else
+	    	device=`GetValueFromField $fname "name:"`
+	    	params=`GenerateLvcreateParameters $device`
+		fi
+	fi
+
+	# Exclude LVs member of that env var
+	if [ "$MINDI_EXCLUDE_DEVS" ] ; then
+		list_of_devices="`mindi --nolog --readalllink $LV_full_string 2> /dev/null`"
+		l=""
+		for d in $list_of_devices; do
+			l="$l `GiveMapperOfdm $d`"
+		done
+		list_of_devices="`echo $l | sort -u`"
+		for ed in `echo $MINDI_EXCLUDE_DEVS | sed 's/|/ /g'`; do
+			if  [ "`echo " $list_of_devices" | grep " $ed"`" != "" ]; then
+				echo "Not including device $LV_full_string as it was excluded"
+				return
+			fi
+		done
+	fi
+	# Do not process LV whose VG are excluded
+	if [ -f $MINDI_TMP/excludedvgs ]; then
+		if [ "`grep -x $volume_group $MINDI_TMP/excludedvgs`" != "" ]; then
+			echo "Not including LV $logical_volume as VG $volume_group was excluded"
+			return
+		fi
+	fi
+
+	echo "# echo y | $LVMCMD lvcreate$params -n $logical_volume $volume_group"
+}
+
+
+GenerateLvcreateParameters() {
+	local device stripes stripesize device fname allocation output readahead
+	fname=$MINDI_TMP/PLF.$$.txt
+	fname2=$MINDI_TMP/PLF2.$$.txt
+	device=$1
+	output=""
+	$LVMCMD lvdisplay $device | cat > $fname
+	stripes=`GetValueFromField $fname "Stripes"`
+	stripesize=`GetValueFromField $fname "Stripe size (MByte)"`m
+	[ "$stripesize" = "m" ] && stripesize=`GetValueFromField $fname "Stripe size (KByte)"`k
+	[ "$stripesize" = "k" ] && stripesize=""
+	currentLE=`GetValueFromField $fname "Current LE"`
+	vgname=`GetValueFromField $fname "VG Name"`
+	$LVMCMD vgdisplay $vgname | cat > $fname2
+	totalLE=`GetValueFromField $fname2 "Total PE"`
+	ratio=`perl -e '$per='$currentLE'*100/'$totalLE' ; print int($per)'`
+	if [ $ratio -eq 0 ]; then
+		# In that case, restoration will fail with 0% so use value
+		output="$output -l $currentLE"
+	else
+		allocation=`perl -e 'print int('$ratio')."%VG"'`
+		output="$output -l $allocation"
+	fi
+	readahead=`GetValueFromField $fname "Read ahead sectors"`
+	rm -f $fname $fname2
+	[ "$stripes" ]    && output="$output -i $stripes"
+	[ "$stripesize" ] && output="$output -I $stripesize"
+	[ "$readahead" ]  && output="$output -r $readahead"
+	echo "$output"
+}
+
+
+
+GenerateVgcreateParameters() {
+	local current_VG device fname incoming VG_info_file max_logical_volumes max_physical_volumes physical_extent_size output blanklines
+	current_VG=$1
+	VG_info_file=$MINDI_TMP/$$.vg-info.txt
+	# We use cat here as a way to avoid SElinux to prevent us from writing in $VG_info_file
+	$LVMCMD vgdisplay $current_VG | cat > $VG_info_file
+	max_logical_volumes=`GetValueFromField "$VG_info_file" "MAX LV"`
+	[ $max_logical_volumes -ge 256 ] && max_logical_volumes=255
+	max_physical_volumes=`GetValueFromField "$VG_info_file" "MAX PV"`
+	[ $max_physical_volumes -ge 256 ] && max_physical_volumes=255
+	physical_extent_size=`GetValueFromField "$VG_info_file" "PE Size"`
+	output=""
+	[ "$max_logical_volumes" ]  && output="$output -l $max_logical_volumes"
+	[ "$max_physical_volumes" ] && output="$output -p $max_physical_volumes"
+	[ "$physical_extent_size" ] && output="$output -s $physical_extent_size"
+	echo "$output"
+	rm -f $VG_info_file
+}
+
+
+
+ProcessVolumeGroup() {
+	local current_VG physical_volumes i list_of_devices VG_params
+	current_VG=$1
+	if [ $lvmversion = 2 ]; then
+		VG_params=`GenerateVgcreateParameters $current_VG`
+		current_PVs=`$LVMCMD pvscan | grep " $current_VG " | awk '{print $2}' | tr '\n' ' '`
+		list_of_devices=$current_PVs
+	else
+		info_file=/proc/lvm/VGs/$current_VG/group
+		physical_volumes=`ls /proc/lvm/VGs/$current_VG/PVs`
+		VG_params=`GenerateVgcreateParameters $current_VG`
+		list_of_devices=""
+		for i in $physical_volumes ; do
+			fname=/proc/lvm/VGs/$current_VG/PVs/$i
+			device=`GetValueFromField $fname "name:"`
+			list_of_devices="$list_of_devices $device"
+		done
+		current_PVs=$list_of_devices
+	fi
+	l=""
+	if [ -f /etc/multipath.conf ]; then
+		# If multipath check which type of devide are given, mpath prefered
+		for d in $list_of_devices; do
+			l="$l `mindi --nolog --readalllink $d 2> /dev/null`"
+			l="$l `GiveMapperOfdm $d`"
+		done
+		list_of_devices="`echo $l | sort -u`"
+	fi
+
+	if [ "$MINDI_EXCLUDE_DEVS" ] ; then
+		for ed in `echo $MINDI_EXCLUDE_DEVS | sed 's/|/ /g'`; do
+			if  [ "`echo " $list_of_devices" | grep " $ed"`" != "" ]; then
+				echo $current_VG >> $MINDI_TMP/excludedvgs
+				return
+			fi
+		done
+	fi
+	echo "# $LVMCMD vgcreate $current_VG$VG_params $current_PVs"
+	echo "# $LVMCMD vgchange -a y $current_VG"
+}
+
+
+
+ListAllPhysicalVolumes() {
+	if [ $lvmversion = 2 ]; then
+		$LVMCMD pvscan 2> /dev/null | grep 'PV' | grep -v unknown | awk '{print $2}' >  $MINDI_TMP/pv.tmp
+	else
+		pvscan 2> /dev/null | grep '"' | cut -d'"' -f2  >  $MINDI_TMP/pv.tmp
+	fi
+
+	rm -f $MINDI_TMP/pv.tmp2
+	for d in `cat $MINDI_TMP/pv.tmp`; do
+		# Skip devices excluded, coming from mondoarchive
+		skip=0
+		l=""
+		l="$l `mindi --nolog --readalllink $d 2> /dev/null`"
+		l="$l `GiveMapperOfdm $d`"
+		list_of_devices="`echo $l | sort -u`"
+		if [ "$MINDI_EXCLUDE_DEVS" ] ; then
+			for ed in `echo $MINDI_EXCLUDE_DEVS | sed 's/|/ /g'`; do
+				if  [ "`echo " $list_of_devices " | grep " $ed"`" != "" ]; then
+					skip=1
+					continue
+				fi
+			done
+		fi
+		if [ $skip -eq 1 ]; then
+			continue
+		fi
+		echo $d >> $MINDI_TMP/pv.tmp2
+	done
+
+	if [ -f /etc/multipath.conf ]; then
+		# If multipath check which type of devide are given, mpath prefered
+		if [ -f  $MINDI_TMP/pv.tmp2 ]; then
+			l=""
+			for d in `cat $MINDI_TMP/pv.tmp2`; do
+				skip=0
+				l="$l `mindi --nolog --readalllink $d 2> /dev/null`"
+				l="$l `GiveMapperOfdm $d`"
+				list_of_devices="`echo $l | sort -u`"
+				if [ "$MINDI_EXCLUDE_DEVS" ] ; then
+					for ed in `echo $MINDI_EXCLUDE_DEVS | sed 's/|/ /g'`; do
+						if  [ "`echo " $list_of_devices " | grep " $ed"`" != "" ]; then
+							skip=1
+							continue
+						fi
+					done
+				fi
+				if [ $skip -eq 1 ]; then
+					continue
+				fi
+				GiveMapperOfdm $d
+			done
+		fi
+	else
+		if [ -f  $MINDI_TMP/pv.tmp2 ]; then
+			cat $MINDI_TMP/pv.tmp2
+		fi
+	fi
+	rm -f $MINDI_TMP/pv.tmp $MINDI_TMP/pv.tmp2
+}
+
+
+ListAllVolumeGroups() {
+	$LVMCMD vgdisplay 2> /dev/null | awk '/^ *VG Name/ {print $3;}'
+}
+
+GiveMapperOfdm () {
+
+major=`stat -L -c "%t" $1 2> /dev/null`
+minor=`stat -L -c "%T" $1 2> /dev/null`
+
+for i in `ls /dev/mapper/*`; do
+	mj=`stat -L -c "%t" $i`
+	mn=`stat -L -c "%T" $i`
+	if [ "$mj" = "$major" ] && [ "$mn" = "$minor" ]; then
+		echo "$i"
+		return
+	fi
+done
+echo $1
+}
+
+GiveVGLVOfdm () {
+
+major=`stat -L -c "%t" $1 2> /dev/null`
+minor=`stat -L -c "%T" $1 2> /dev/null`
+
+for v in `vgs --noheadings | awk '{print $1}'`; do
+	for i in `ls /dev/$v/*`; do
+		mj=`stat -L -c "%t" $i`
+		mn=`stat -L -c "%T" $i`
+		if [ "$mj" = "$major" ] && [ "$mn" = "$minor" ]; then
+			echo "$i"
+			return
+		fi
+	done
+done
+echo $1
+}
+
+
+ListLvmDrivesAndPartitions() {
+	# We get partitions in this loop not devices
+	for d in `$LVMCMD vgdisplay -v 2> /dev/null | grep "PV Name" | sed 's/(#)//' | awk '{print $3}'`; do 
+		# If multipath check which type of devices are given, mpath prefered
+		if [ -f /etc/multipath.conf ]; then
+			i=`GiveMapperOfdm $d`
+			rep=$i
+		else
+			rep=$d
+		fi
+		skip=0
+		if [ "$MINDI_EXCLUDE_DEVS" ] ; then
+			for ed in `echo $MINDI_EXCLUDE_DEVS | sed 's/|/ /g'`; do
+				if  [ "`echo " $rep " | grep " $ed"`" != "" ]; then
+					skip=1
+					continue
+				fi
+			done
+		fi
+		if [ $skip -eq 1 ]; then
+			continue
+		fi
+		echo $rep
+	done
+}
+
+
+
+PrettifyList() {
+	local i
+	echo -en "$1"
+	for i in $2 ; do
+		echo -en "$i "
+	done
+	echo ""
+}
+
+ListAllLogicalVolumesSortedBydm() {
+	rm -f $MINDI_TMP/sorteddm
+	for d in `ListAllLogicalVolumes` ; do
+		dm=`mindi --nolog --readalllink $d 2> /dev/null | tail -1`
+		echo "$dm|$d" >> $MINDI_TMP/sorteddm
+	done
+	if [ -f $MINDI_TMP/sorteddm ]; then
+		cut -d'-' -f2- $MINDI_TMP/sorteddm | sort -t'|' -n | cut -d'|' -f2
+	fi
+}
+
+ListAllLogicalVolumes() {
+	if [ $lvmversion = 2 ]; then
+		$LVMCMD lvscan 2> /dev/null | grep "'" | grep -iw "ACTIVE" | cut -d"'" -f2
+	else
+		lvscan 2> /dev/null | grep '"' | grep -iw "ACTIVE" | cut -d'"' -f2
+	fi
+}
+
+
+
+WriteShutdownScript() {
+	local i
+	echo ""
+	echo "Finally, to shut down and delete the volumes, do this:-"
+	for i in `ListAllLogicalVolumes` ; do
+	    echo "($LVMCMD lvremove -f $i)"
+	done
+	for i in `ListAllVolumeGroups` ; do
+	    echo "($LVMCMD vgchange -a n $i)"
+	done
+	for i in `ListAllVolumeGroups` ; do
+	    echo "($LVMCMD vgremove $i)"
+	done
+	if [ $lvmversion = 2 ]; then
+		echo "(rmmod dm-mod & rmmod dm_mod & )"
+	else
+		echo "(rmmod lvm-mod)"
+	fi
+}
+
+
+
+# -------------------------------- main -----------------------------------
+
+# These exports are needed to avoid bad formating of display commands (, instead of . for separator e.g.)
+# Fix #654
+export LANG=C
+export LANGUAGE=C
+
+if [ "$1" = "--givemapperofdm" ] ; then
+	shift
+	if [ _"$1" != _"" ] ; then
+		GiveMapperOfdm $1
+	fi
+	exit 0
+fi
+
+if [ "$1" = "--givevglvofdm" ] ; then
+	shift
+	if [ _"$1" != _"" ] ; then
+		GiveVGLVOfdm $1
+	fi
+	exit 0
+fi
+
+
+which lvmdiskscan 2>/dev/null 2>&1 || Die "lvmdiskscan not found. Won't handle LVM."
+if [ -e "/proc/lvm/global" ] && [ "`tr -s '\t' ' ' < /proc/lvm/global | grep "0 VGs 0 PVs 0 LVs"`" != "" ]; then
+	exit 1
+fi
+
+if [ _"$MINDI_TMP" = _"" ]; then
+	# Launched stdalone, so create a temp dir
+	STDALONE="true"
+	TMPDIR=${TMPDIR:=/tmp}
+	if [ ! -d $TMPDIR ]; then
+		mkdir -p $TMPDIR
+	fi
+	MINDI_TMP=`mktemp -d $TMPDIR/mindi.XXXXXXXXXX`
+	if [ $? -ne 0 ]; then
+		df $TMPDIR
+		Die "Unable to create a temporary directory ! Check space on $TMPDIR"
+	fi
+	if [ _"$MINDI_TMP" = _"" ]; then
+		Die "MINDI_TMP is empty, aborting"
+	fi
+	if [ _"$MINDI_TMP" = _"/" ]; then
+		Die "MINDI_TMP is /, aborting"
+	fi
+fi
+
+# Older lvmdiskscan use --help, newer --version
+lvmopt="--help"
+lvmdiskscan $lvmopt 2>&1 | grep -q -- "--version"
+if [ $? -eq 0 ]; then
+	lvmopt="--version"
+fi
+
+
+lvmversion=`lvmdiskscan --help 2>&1 |
+  grep -E "Logical Volume Manager|LVM version:" |
+  cut -d: -f2 | cut -d. -f1 |
+  awk '{print $NF}' |
+  sed -e 's/ //g'`
+
+if which lvm 2>/dev/null; then
+	version=`lvm version | grep "LVM version" | awk '{print $3}'`
+	i="`echo "$version" | cut -d'.' -f1`"
+	echo "i=$i"
+	if [ "$i" -ge "2" ] ; then
+		lvmversion=2
+	fi
+fi
+
+if [ $lvmversion = 2 ]; then
+	echo "LVM version >= 2.0 found."
+	LVMCMD="lvm"
+else
+	LVMCMD=""
+fi
+
+rm -f $MINDI_TMP/excludedvgs
+all_lvm_drives_and_partitions=`ListLvmDrivesAndPartitions`
+echo "Just before you extrapolate mountlist to include RAID partitions,"
+echo "extrapolate it to include the following LVM drives and partitions:-"
+PrettifyList ">>>>> " "$all_lvm_drives_and_partitions"
+echo "To get started, type:-"
+if [ $lvmversion = 2 ]; then
+	echo "(insmod dm-mod)"
+	echo "(insmod dm_mod)"
+else
+	echo "(insmod lvm-mod)"
+fi
+echo "# $LVMCMD vgchange -an"
+for i in `ListAllPhysicalVolumes` ; do
+	echo "# echo y | $LVMCMD pvcreate -ff $i"
+done
+echo "# $LVMCMD vgscan"
+echo ""
+echo "Create and activate the VG's (volume groups)."
+all_volume_groups=`ListAllVolumeGroups`
+for current_VG in $all_volume_groups ; do
+	if [ $lvmversion -ne 2 ]; then
+	    echo "# rm -Rf /dev/$current_VG"
+	fi
+	ProcessVolumeGroup $current_VG
+done
+echo ""
+echo "Finally, create the LV's (logical volumes)."
+all_logical_volumes=`ListAllLogicalVolumesSortedBydm`
+for current_LV in $all_logical_volumes ; do
+	ProcessLogicalVolume $current_LV
+done
+echo ""
+echo "# $LVMCMD vgscan"
+echo "Now you may format the LV's:-"
+for i in `ListAllLogicalVolumes` ; do
+	echo "(mkfs -t foo $i or something like that)"
+done
+rm -f $MINDI_TMP/excludedvgs
+WriteShutdownScript
+if [ _"$STDALONE" = _"true" ]; then
+	rm -rf $MINDI_TMP
+fi
+exit 0
+
+
+

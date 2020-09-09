@@ -1,0 +1,749 @@
+#!/usr/bin/perl -w
+#
+# $Id: mr-parted2fdisk 3576 2016-04-27 22:52:19Z bruno $
+#
+# mr-parted2fdisk: fdisk like interface for parted 
+# [developed for mindi/mondo http://www.mondorescue.org]
+#
+# Aims to be architecture independant (i386/ia64)
+# Tested on ia64 with RHAS 2.1 - Mandrake 9.0 - RHEL 3.0 - SLES 10 - RHEL 5 - 
+#
+# Copyright B. Cornec 2000-2015
+# Provided under the GPL v2
+
+use strict;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Carp qw/confess cluck/;
+use Data::Dumper;
+use English;
+use MondoRescue::Version;
+use MondoRescue::Base;
+use MondoRescue::Disk;
+use ProjectBuilder::Base;
+
+=pod
+
+=head1 NAME
+
+mr-parted2fdisk is a fdisk like command using parted internally for analysing GPT labelled disks 
+
+=head1 DESCRIPTION
+
+mr-parted2fdisk behaves like the fdisk command, but dialog internally with parted in order to manipulate partition tables, which allow it to support GPT partition format as well as MBR, contrary to fdisk. It aims at providing compatible external interface with fdisk. Developed initialy for ia64 Linux, it is also useful now on x86 systems using GPT partition format (for large HDDs).
+
+=head1 SYNOPSIS
+
+mr-parted2fdisk -s partition
+
+mr-parted2fdisk -l [device]
+
+mr-parted2fdisk [-n] device
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<-s>
+
+Print the size (in blocks) of the given partition.
+
+=item B<-l>
+
+List the partition tables for the specified device (or all if none specified) and then exit.
+
+=item B<-n>
+
+Fake mode. Doesn't pass the commands just simulate.
+
+=item B<-v>
+
+Verbose mode. Used to help debugging issues.
+
+=item B<no option>
+
+Allow the creation and manipulation of partition tables.
+
+=back
+
+=head1 ARGUMENTS
+
+=over 4
+
+=item B<partition> 
+
+partition device file (only used with -s option).
+
+=item B<device> 
+
+device file to work on.
+
+=back
+
+=head1 WEB SITES
+
+The main Web site of the project is available at L<http://www.mondorescue.org>. Bug reports should be filled using the trac instance of the project at L<http://trac.mondorescue.org/>.
+
+=head1 USER MAILING LIST
+
+For community exchanges around MondoRescue please use the list L<http://sourceforge.net/mailarchive/forum.php?forum_name=mondo-devel>
+
+=head1 AUTHORS
+
+The MondoRescue team lead by Bruno Cornec L<mailto:bruno@mondorescue.org>.
+
+=head1 COPYRIGHT
+
+MondoRescue is distributed under the GPL v2.0 license or later,
+described in the file C<COPYING> included with the distribution.
+
+=cut
+
+
+$ENV{LANG} = "C";
+$ENV{LANGUAGE} = "C";
+$ENV{LC_ALL} = "C";
+
+# Log 
+my $flog = "/var/log/mr-parted2fdisk.log";
+open(FLOG, "> $flog") || die "Unable to open $flog";
+
+my $i;
+my $l;
+my $part;
+my $wpart;
+my $start = "";
+my $end = "";
+my $cylstart;
+my $cylend;
+my %start;
+my %end;
+my %type;
+my $fake = 0;
+my $mega = 1048576;
+my %opts;
+
+# Immediate flushing to avoids read error from mondorestore in log files
+$| = 1;
+
+#
+# We always use fdisk except with GPT types of 
+# partition tables where we need parted
+# All should return fdisk like format so that callers
+# think they have called fdisk directly
+#
+my $un;
+my $type;
+my $device;
+my $endmax = "";
+my $appname = "mr-parted2fdisk";
+my ($mrver,$mrrev) = mr_version_init();
+
+pb_syntax_init("$appname Version $mrver-$mrrev\n");
+
+if ($#ARGV < 0) {
+	pb_syntax(-1,0);
+}
+
+GetOptions("help|?|h+" => \$opts{'h'}, 
+		"device|d|s=s" => \$opts{'s'},
+		"list|l" => \$opts{'l'},
+		"Log-File|L=s" => \$opts{'L'},
+		"man" => \$opts{'man'},
+		"noop|n" => \$opts{'n'},
+		"quiet|q" => \$opts{'q'},
+		"version|V=s" => \$opts{'V'},
+		"verbose|v+" => \$opts{'v'},
+		"stop-on-error!" => \$Global::pb_stop_on_error,
+) || pb_syntax(-1,0);
+
+if (defined $opts{'L'}) {
+	open(pbLOG,"> $opts{'L'}") || die "Unable to log to $opts{'L'}: $!";
+	$pbLOG = \*pbLOG;
+	}
+pb_log_init($opts{'v'}, $pbLOG);
+
+# We support at most one option and one device
+if ((defined $opts{'l'}) && (defined $opts{'s'})) {
+	pb_syntax(-1,0);
+}
+
+# Create a device var which will be the devide or partition on which to work
+# whatever the option used.
+$device = $ARGV[0] if (defined $opts{'l'});
+$device = $opts{'s'} if (defined $opts{'s'});
+$device = $ARGV[0] if (defined $ARGV[0]);
+$device = "" if ((not defined $device) || ($device =~ /^-/));
+
+# -s takes a partition as arg
+# so create a correct device from that
+if (defined $opts{'s'}) {
+	$wpart = $device;
+	# To support dev like cciss/c0d0p1
+	if ($device =~ /([0-9]+)p[0-9]+$/) {
+		$device =~ s/([0-9]+)p[0-9]+$/$1/;
+	} else {
+		$device =~ s/[0-9]+$//;
+	}
+}
+
+if (defined $opts{'n'}) {
+	print FLOG "Fake mode. Nothing will be really done\n";
+	$fake = 1;
+}
+
+pb_log(1,"Called with device: $device\n");
+
+my %pid = (	"FAT" => "6",
+		"fat32" => "b",
+		"fat16" => "e",
+		"ext2" => "83",
+		"ext3" => "83",
+		"ext4" => "83",
+		"xfs" => "83",
+		"btrfs" => "83",
+		"reiserfs" => "83",
+		"linux-swap" => "82",
+		"lvm" => "8e",
+		"raid" => "fd",
+		"" => "",
+	);
+my %pnum;
+
+# Reverse table of pid
+while (($i,$l) = each %pid) {
+	next if ($i eq "ext2");
+	$pnum{$l} = $i;
+}
+
+# util-linux/fdisk version
+my $fdisk = pb_check_req("fdisk",0);
+open(CMD,"$fdisk -v |") || die "Unable to execute $fdisk";
+my $version = <CMD>;
+close(CMD);
+chomp($version);
+# RHEL 5 has fdisk from util-linux 2.13-pre7
+# Mageia 4 has fdisk from util-linux 2.24.2
+$version =~ s/[^0-9\.]*([0-9a-z\.-]+)[\)]*$/$1/;
+my ($v,$maj,$min) = split(/\./,$version);
+
+# Consider pre version the same as the following for formats
+if ((defined $maj) && ($maj =~ /-pre/)) {
+	$maj =~ s/-pre.*$//;
+	$maj++;
+}
+# Remove potential remaining letters
+$maj =~ s/[a-z]+//;
+
+if ((defined $min) && ($min =~ /-pre/)) {
+	$min =~ s/-pre.*$//;
+	$min++;
+}
+$min =~ s/[a-z]+//;
+
+# Check partition table type
+$type = mr_disk_type($device);
+# Replacement code only for GPT disks
+if ((($v == 1) || (($v == 2) && ($maj < 22))) && ($type ne "MBR")) {
+	pb_log(1,"This distribution uses an old fdisk, activating replacement code for GPT disk label...\n");
+	my $parted = pb_check_req("parted",0);
+	if (defined $opts{'l'}) {
+		fdisk_list($device,undef,\%start,\%end, 1);
+	} elsif (defined $opts{'s'}) {
+		fdisk_list($device,$wpart,\%start,\%end, 1);
+	} else {
+		# Read fdisk orders on stdin and pass them to parted
+		# on the command line as parted doesn't read on stdin
+		pb_log(1,"Translating fdisk command to parted\n");
+		while ($i = <STDIN>) {
+			if ($i =~ /^p$/) {
+				fdisk_list($device,undef,\%start,\%end, 1);
+				print "command (m for help) sent back to fake fdisk for mondorestore\n";
+			} elsif ($i =~ /^n$/) {
+				fdisk_list($device,undef,\%start,\%end, 0);
+				if ($type ne "GPT") {
+					pb_log(1,"Forcing GPT type of disk label\n");
+					pb_log(1,"mklabel gpt\n");
+					pb_system("$parted -s $device mklabel gpt\n") if ($fake == 0);
+					$type = "GPT";
+				}
+				$l = <STDIN>;
+				if (not defined $l) {
+					pb_log(1,"no primary/extended arg given for creation... assuming primary\n");
+					$l = "p";
+				}
+				chomp($l);
+				$part = <STDIN>;
+				if ((not defined $part) || ($part eq "")) {
+					pb_log(1,"no partition given for creation... skipping\n");
+					next;
+				}
+				chomp($part);
+				$cylstart = <STDIN>;
+				chomp($cylstart);
+				if ((not defined $cylstart) || ($cylstart eq "")) {
+					if (defined $start{$part-1}) {
+						# in MB => cyl
+						$cylstart = sprintf("%d",$end{$part-1}*$mega/$un + 1);
+					} else {
+						$cylstart = 1;
+					}
+					pb_log(1,"no start cyl given for creation... assuming the following: $cylstart\n");
+				} else {
+					pb_log(1,"start cyl: $cylstart\n");
+				}
+				$cylstart = 1 if ($cylstart < 1);
+				$un = get_un($device, "", 0);
+				# parted needs MB
+				if ($cylstart == 1) {
+					$start = 0.01;
+				} else {
+					$start = $cylstart* $un / $mega + 0.001;
+				}
+				# this is a size in B/KB/MB/GB
+
+				$endmax = get_max($device);
+				$cylend = <STDIN>;
+				chomp($cylend);
+				if ((not defined $cylend) || ($cylend eq "")) {
+					pb_log(1,"no end cyl given for creation... assuming full disk)\n");
+					$cylend = $endmax;
+				}
+				# Handles end syntaxes (+, K, M, ...)
+				# to give cylinders
+				if ($cylend =~ /^\+/) {
+					$cylend =~ s/^\+//;
+					# Handles suffixes; return bytes
+					$cylend = decode_Bsuf($cylend,1);
+					# This gives the number of cyl
+					$cylend /= $un;
+					$cylend = sprintf("%d",$cylend);
+					$cylend += $cylstart - 0.001;
+					# We now have the end cyl
+				}
+				$cylend = $endmax if ($cylend > $endmax); 
+				pb_log(1,"end cyl: $cylend\n");
+				# parted needs MB
+				$end = $cylend * $un / $mega;
+				pb_log(1,"n $l $part $cylstart $cylend => mkpart primary $start $end\n");
+				pb_system("$parted -s $device mkpart primary ext2 $start $end\n") if ($fake == 0);
+				print "command (m for help) sent back to fake fdisk for mondorestore\n";
+			} elsif ($i =~ /^d$/) {
+				$part = <STDIN>;
+				if (not defined $part) {
+					pb_log(1,"no partition given for deletion... skipping\n");
+					next;
+				}
+				chomp($part);
+				pb_log(1,"d $part => rm $part\n");
+				pb_system("$parted -s $device rm $part\n") if ($fake == 0);
+				get_parted($device,undef,\%start,\%end,undef);
+				print "command (m for help) sent back to fake fdisk for mondorestore\n";
+			} elsif ($i =~ /^w$/) {
+				pb_log(1,"w => quit\n");
+			} elsif ($i =~ /^t$/) {
+				$part = <STDIN>;
+				if (not defined $part) {
+					pb_log(1,"no partition given for tagging... skipping\n");
+					next;
+				}
+				chomp($part);
+				# If no partition number given it's 1, and we received the type
+				if ($part !~ /\d+/) {
+					$l = $part;
+					$part = 1 
+				} else {
+					$l = <STDIN>;
+				}
+				if (not defined $l) {
+					pb_log(1,"no type given for tagging partition $part... skipping\n");
+					next;
+				}
+				chomp($l);
+				if (not defined $pnum{$l}) {
+					pb_log(1,"no partition number given for $l... please report to the author\n");
+					next;
+				}
+
+				if ($pnum{$l} eq "lvm") {
+					# In that case this is a flag set, not a mkfs
+					pb_log(1,"t $part $l => set $part $pnum{$l} on\n");
+					pb_system("$parted -s $device set $part $pnum{$l} on\n") if ($fake == 0);
+				} else {
+					pb_log(1,"t $part $l => mkfs $part $pnum{$l}\n");
+					pb_system("$parted -s $device mkfs $part $pnum{$l}\n") if ($fake == 0);
+				}
+				print "command (m for help) sent back to fake fdisk for mondorestore\n";
+			} elsif ($i =~ /^a$/) {
+				$part = <STDIN>;
+				if (not defined $part) {
+					pb_log(1,"no partition given for tagging... skipping\n");
+					next;
+				}
+				chomp($part);
+
+				# Partition shouldn't be negative or null. Then take the first one.
+				$part = 1 if ($part le 0);
+
+				pb_log(1,"a $part => set $part boot on\n");
+				pb_system("$parted -s $device set $part boot on\n") if ($fake == 0);
+				print "command (m for help) sent back to fake fdisk for mondorestore\n";
+			} elsif ($i =~ /^q$/) {
+				pb_log(1,"q => quit\n");
+			} else {
+				pb_log(1,"Unknown command: $i\n");
+				print "command (m for help) sent back to fake fdisk for mondorestore\n";
+				next;
+			}
+				
+		}
+	}
+	exit(0);
+}
+
+#
+# Else everything is for fdisk
+#
+# Print only mode
+local_fdisk(\%opts,$device);
+exit(0);
+
+# End of main
+
+
+sub local_fdisk {
+
+my $opts=shift;
+my $device=shift;
+
+pb_log(1,"Passing everything to the real fdisk with device: $device\n");
+pb_log(1,"and the -s $wpart option\n") if (defined $opts{'s'});
+
+if ((defined $opts->{'l'}) || (defined $opts->{'s'})) {
+	my $args = "-l $device" if (defined $opts->{'l'});
+	$args = "-s $wpart" if (defined $opts->{'s'});
+	open (FDISK, "$fdisk $args 2>/dev/null |") || die "Unable to read from $fdisk";
+	while (<FDISK>) {
+		print $_;
+	}
+	close(FDISK);
+} else {
+	# Modification mode
+	open (FDISK, "| $fdisk $device 2>/dev/null") || die "Unable to modify through $fdisk";
+	while (<STDIN>) {
+		print FDISK $_;
+	}
+	close(FDISK);
+	close(STDIN);
+}
+return;
+}
+
+# Unused for now - Kept for reference in case there is a need later on
+sub fdisk_list_all {
+
+my $device = shift;
+my $wpart = shift;
+my $start = shift;
+my $end = shift;
+my $verbose = shift;
+
+return fdisk_list($device,$wpart,$start,$end,$verbose) if ((defined $device) && ($device ne ""));
+
+# If no device given loop on the list of devices found in /proc/partitions
+open(PART,"/proc/partitions") || die "Unable to open /proc/partitions";
+while (<PART>) {
+	my ($maj,$min,$blocks,$dev) = split(/\s+/);
+	next if ($dev =~ /^fd|^sr/);
+	next if ($min != 0);
+	fdisk_list("/dev/$dev",$wpart,$start,$end,$verbose);
+}
+close(PART);
+}
+
+
+sub fdisk_list {
+
+my $device = shift;
+my $wpart = shift;
+my $start = shift;
+my $end = shift;
+my $verbose = shift;
+
+my $un;
+my $endmax;
+my $d;
+my $n;
+
+my %cmt = (	"FAT" => "FAT",
+		"ext2" => "Linux",
+		"ext3" => "Linux",
+		"ext4" => "Linux",
+		"xfs" => "Linux",
+		"reiserfs" => "Linux",
+		"linux-swap" => "Linux swap",
+		"lvm" => "Linux LVM",
+		"raid" => "RAID Linux auto",
+		"fat16" => "fat16",
+		"fat32" => "fat32",
+		"" => "Linux",
+);
+
+my $part;
+my $mstart;
+my $mend;
+my $length;
+my $pid;
+my $cmt;
+format FLOG1 =
+@<<<<<<<<<<<< @>>>>>>>>>> @>>>>>>>>>> @>>>>>>>>>> @>>>  @<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+$part,        $mstart,   $mend,   $length,  $pid, $cmt
+.
+format FLOG2 =
+@<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+$part,
+              @>>>>>>>>>> @>>>>>>>>>> @>>>>>>>>>> @>>>  @<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+              $mstart,   $mend,   $length,  $pid, $cmt
+.
+format STDOUT1 =
+@<<<<<<<<<<<< @>>>>>>>>>> @>>>>>>>>>> @>>>>>>>>>> @>>>  @<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+$part,        $mstart,   $mend,   $length,  $pid, $cmt
+.
+format STDOUT2 =
+@<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+$part,
+              @>>>>>>>>>> @>>>>>>>>>> @>>>>>>>>>> @>>>  @<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+              $mstart,   $mend,   $length,  $pid, $cmt
+.
+#   Device Boot      Start         End      Blocks   Id  System
+#/dev/hda1               1       77579    39099374+  ee  EFI GPT
+
+
+#
+# Keep Fdisk headers
+#
+# this will return bytes
+$un = get_un($device,$wpart,$verbose);
+
+$endmax = get_max($device);
+
+# This will return MB
+get_parted($device,$start,$end,\%type);
+
+while (($n,$d) = each %type) {
+	# Print infos fdisk like
+	$part = ${device}.$n;
+	# start and end are in cylinder in fdisk format
+	# so return in MB * 1MB / what represents 1 cyl in B
+	$mstart = sprintf("%d",$$start{$n}*$mega/$un);
+	$mstart = 1 if ($mstart < 1);
+	$mstart = $endmax if ($mstart > $endmax);
+	$mend = sprintf("%d",$$end{$n}*$mega/$un - 1);
+	$mend = $endmax if ($mend > $endmax);
+	$mend = 1 if ($mend < 1);
+	# length is in 1K blocks
+	$length = sprintf("%d",($mend-$mstart+1)*$un/1024);
+	$pid = $pid{$type{$n}};
+	$cmt = $cmt{$type{$n}};
+	#print FLOG "$part - $mstart - $mend - $length\n";
+
+	if ($verbose == 1) {
+		if (not defined $wpart) {
+			if (length($part) > 13) {
+				open(STDOUT2,">&STDOUT") || die "Unable to open STDOUT2";
+				select(STDOUT2);
+				write;
+				open(FLOG2,">&FLOG") || die "Unable to open FLOG2";
+				select(FLOG2);
+				write;
+				select(STDOUT);
+				close(FLOG2);
+				close(STDOUT2);
+			} else {
+				open(STDOUT1,">&STDOUT") || die "Unable to open STDOUT1";
+				select(STDOUT1);
+				write;
+				open(FLOG1,">&FLOG") || die "Unable to open FLOG1";
+				select(FLOG1);
+				write;
+				select(STDOUT);
+				close(FLOG1);
+				close(STDOUT1);
+			}
+		} else {
+			# manage the -s option of fdisk here
+			print "$length\n" if ($part eq $wpart);
+			pb_log(1,"$part has $length KBytes\n") if ($part eq $wpart);
+		}
+	}
+}
+close(FDISK);
+close(PARTED);
+}
+
+# 
+# Get max size from fdisk
+#
+sub get_max {
+
+my $device = shift;
+my $max = 0;
+my $foo;
+
+open (FDISK, "$fdisk -l $device 2>/dev/null |") || die "Unable to read from $fdisk";
+while (<FDISK>) {
+	if ($_ =~ /heads/) {
+		chomp;
+		$max = $_;
+		$max =~ s/.* ([0-9]+) cylinders/$1/;
+	}
+}
+close(FDISK);
+pb_log(2,"get_max returns $max\n");
+return($max);
+}
+
+# 
+# Get units from fdisk (cylinder size)
+#
+sub get_un {
+
+my $device = shift;
+my $wpart = shift;
+my $verbose = shift;
+my $un = 0;
+my $foo;
+
+open (FDISK, "$fdisk -l $device 2>/dev/null |") || die "Unable to read from $fdisk";
+while (<FDISK>) {
+	print if (($_ !~ /^\/dev\//) and (not (defined $wpart)) and ($verbose == 1));
+	if ($_ =~ /^Units/) {
+		($foo, $un , $foo) = split /=/;
+		$un =~ s/[A-z\s=]//g;
+		$un = eval($un);
+	}
+}
+close(FDISK);
+pb_log(2,"get_un returns $un\n");
+return($un);
+}
+
+# 
+# Parted gives info in MB
+# (depending on versions - 1.6.25.1 provides suffixes)
+#
+sub get_parted {
+
+my $device = shift;
+my $start = shift;
+my $end = shift;
+my $type = shift;
+my $void;
+my $d;
+my $n;
+my $ret;
+my $mode;
+my $size;
+my $unit;
+
+my $parted = pb_check_req("parted",0);
+open (PARTED, "$parted -v |") || die "Unable to read from $parted";
+$d = <PARTED>;
+pb_log(2,"$d");
+close(PARTED);
+chomp($d);
+# parted version
+$d =~ s/[^0-9\.]*([0-9\.]+)$/$1/;
+my ($v,$maj,$min) = split(/\./,$d);
+# depending on parted version, information given change:
+if ($v == 2) {
+	# RHEL 6 parted 2.1
+	$mode=2;
+} elsif ($v == 1) {
+	if (($maj <= 5) || (($maj == 6) && (defined $min) && ($min < 25))) {
+		# RHEL 3 parted 1.6.3
+		# RHEL 4 parted 1.6.19
+		$mode=0;
+	} else {
+		# SLES 10 parted >= 1.6.25
+		$mode=1;
+	}
+} else {
+	$mode=-1;
+}
+pb_log(2,"parted mode: $mode\n");
+
+open(PARTED, "$parted -s $device print |") || die "Unable to read from $parted";
+# Skip 3 first lines
+$d = <PARTED>;
+$d = <PARTED>;
+$d = <PARTED>;
+
+if ($mode == 2) {
+	$d = <PARTED>;
+	$d = <PARTED>;
+	$d = <PARTED>;
+}
+pb_log(2,"Got from parted: \n");
+pb_log(2,"Minor    Start       End     Filesystem\n");
+# Get info from each partition line
+while (($n,$d) = split(/\s/, <PARTED>,2)) {
+	chomp($d);
+	# v2 of parted ends with empty line
+	next if (($mode == 2) && ($n eq "") && ($d eq ""));
+	# v2 of parted starts with space potentially
+	($n,$d) = split(/\s/, $d,2) if (($mode == 2) && ($n eq ""));
+	next if ($n !~ /^[1-9]/);
+	$d =~ s/^\s*//;
+	$d =~ s/\s+/ /g;
+	if ($mode == 0) {
+		($$start{$n},$$end{$n},$$type{$n},$void) = split(/ /,$d);
+		$unit = 1;
+	} elsif ($mode == 1) {
+		($$start{$n},$$end{$n},$size,$$type{$n},$void) = split(/ /,$d);
+		$unit = $mega;
+	} elsif ($mode == 2) {
+		($$start{$n},$$end{$n},$size,$$type{$n},$void) = split(/ /,$d);
+		$unit = $mega;
+	} else {
+		die "Undefined mode $mode";
+	}
+	$$start{$n} = "" if (not defined $$start{$n});
+	$$end{$n} = "" if (not defined $$end{$n});
+	$$type{$n} = "" if (not defined $$type{$n});
+	# Handles potential suffixes in latest parted version. Return MB
+	$ret = decode_Bsuf($$start{$n},$unit);
+	$$start{$n} = $ret;
+	$ret = decode_Bsuf($$end{$n},$unit);
+	$$end{$n} = $ret;
+	pb_log(2,"$n      $$start{$n}      $$end{$n}     $$type{$n}\n");
+}
+close(PARTED);
+}
+
+sub decode_Bsuf {
+
+my $size  = shift;
+my $unit  = shift;
+my $ret = 0;
+
+pb_log(2,"decode_Bsuf input: $size / $unit ");
+if ($size =~ /K[B]*$/i) {
+	$size =~ s/K[B]*$//i;
+	$size *= 1024;
+} elsif ($size =~ /M[B]*$/i) {
+	$size =~ s/M[B]*$//i;
+	$size *= 1048576;
+} elsif ($size =~ /G[B]*$/i) {
+	$size =~ s/G[B]*$//i;
+	$size *= 1073741824;
+} elsif ($size =~ /T[B]*$/i) {
+	$size =~ s/T[B]*$//i;
+	$size *= 1099511627776;
+} else {
+	# Nothing to do
+}
+$ret = $size / $unit;
+pb_log(2," - output : $size => $ret\n");
+return($ret);
+}
