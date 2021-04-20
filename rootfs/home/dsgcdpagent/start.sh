@@ -16,6 +16,9 @@ HOME="/home/dsgcdpagent"
 }
 
 cd $HOME
+#disable OP_WRITE_SAME
+echo 0 | tee /sys/block/*/device/scsi_disk/*/max_write_same_blocks
+
 [ ! -d ./meta ] && mkdir meta
 #mount -t tmpfs tmpfs ./meta >/dev/null 2>&1
 #[ -d ./metabak ] && cd metabak
@@ -29,8 +32,8 @@ if [ "$localuuid" != "$confuuid" ]; then
 	exit 0
 fi
 
-$MODPROBE drbd minor_count=32 || {
-	echo "Can not load the drbd module."$'\n'
+$MODPROBE dsg_drbd minor_count=32 || {
+	echo "Can not load the dsg_drbd module."$'\n'
 	exit 5 
 
 }
@@ -44,8 +47,8 @@ $MODPROBE drbd minor_count=32 || {
 #done
 
 $DRBDADM adjust-with-progress all
-$DRBDADM --force primary all
 [[ $? -gt 1 ]] && exit 20
+$DRBDADM --force primary all
 $DRBDADM wait-con-int 
 cd $HOME
 ./dsgcdpagent &

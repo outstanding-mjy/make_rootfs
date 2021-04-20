@@ -1,0 +1,7 @@
+Name: udev
+Description: eudev
+Version: 215
+prefix=/home/dsg/viz/make_rootfs/rootfs
+exec_prefix=${prefix}
+udevdir=${exec_prefix}/lib/udev
+

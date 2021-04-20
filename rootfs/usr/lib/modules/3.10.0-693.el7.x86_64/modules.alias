@@ -15139,4 +15139,4 @@ alias vport-type-3 vport_gre
 alias net-pf-40 vmw_vsock_vmci_transport
 alias vmware_vsock vmw_vsock_vmci_transport
 alias virtio:d00000013v* vmw_vsock_virtio_transport
-alias block-major-147-* drbd
+alias block-major-147-* dsg_drbd

@@ -13,12 +13,16 @@ if [ $# -lt 1 ]; then
     exit 1
 fi
 
-
 METAFILE=$1
 
 DEVICE=$( /home/dsgcdpagent/getsysdisk.sh $METAFILE )
 
 MOUNTED_DEV=$( df -P $METAFILE | awk 'NR==2{print $1}' )
+
+if [ -f $METAFILE.conf ]; then
+	cat $METAFILE.conf
+	exit 0
+fi
 
 lsblk -pP $DEVICE |grep $MOUNTED_DEV > /dev/null 
 [ ! $? -eq 0 ] &&  { echo "the device not contain the metafile"; exit 1; }
@@ -40,45 +44,42 @@ case $D_TYPE in
 	else
 	PARTOFFSET=$( blkid -ip $LVMDEV |grep PART_ENTRY_OFFSET |sed 's/PART_ENTRY_OFFSET=//' )	
 	fi
-	EXTENDS=$( filefrag -b512 -v $METAFILE | awk 'NR>=4{print $4 ":" $6  }' |awk -F":" '{print $1 $2}' )
-	for EXTEND in $EXTENDS ; do
-		begin=$( echo $EXTEND | awk -F"." '{print $1}' )
-		len=$( echo $EXTEND | awk -F"." '{print $3}' )
-		[ -z $len ] && continue
-		BEGIN=$( echo "$begin + $PARTOFFSET+$LVM_OFFSET" | bc )
-		END=$( echo "$len + $BEGIN " | bc )
-		echo "$DEVICE --nostart=$BEGIN --nostop=$END"
-	done
+	EXTENDS=$( filefrag -b512 -v $METAFILE | awk -F":" 'NR>=4{print $3":"$4}' )
+	begin=$( echo $EXTENDS | awk -F"." '{print $1}' )
+	len=$( echo $EXTENDS | awk -F":" '{print $2}' )
+	[ -z $len ] && continue
+	BEGIN=$( echo "print($begin + $PARTOFFSET+$LVM_OFFSET)" | python - )
+	END=$( echo "print($len + $BEGIN) " | python - )
+	echo "$DEVICE --nostart=$BEGIN --nostop=$END"
+	echo "$DEVICE --nostart=$BEGIN --nostop=$END" > $METAFILE.conf
 	;;
 'TYPE="part"')
-	if [ $MOUNTED_DEV == $DEVICE]; then
+	if [ $MOUNTED_DEV == $DEVICE ]; then
 	PARTOFFSET=0
 	else
-	PARTOFFSET=$( blkid -ip $LVMDEV |grep PART_ENTRY_OFFSET |sed 's/PART_ENTRY_OFFSET=//' )	
+	PARTOFFSET=$( blkid -ip $MOUNTED_DEV |grep PART_ENTRY_OFFSET |sed 's/PART_ENTRY_OFFSET=//' )	
 	fi
-	
-	EXTENDS=$( filefrag -b512 -v $METAFILE | awk 'NR>=4{print $4 ":" $6  }' |awk -F":" '{print $1 $2}' )
-	for EXTEND in $EXTENDS ; do
-		begin=$( echo $EXTEND | awk -F"." '{print $1}' )
-		len=$( echo $EXTEND | awk -F"." '{print $3}' )
-		[ -z $len ] && continue
-		BEGIN=$( echo "$begin + $PARTOFFSET" | bc )
-		END=$( echo "$len + $BEGIN" | bc )
+
+	EXTENDS=$( filefrag -b512 -v $METAFILE | awk -F":" 'NR>=4{print $3":"$4}' )
+	begin=$( echo $EXTENDS | awk -F"." '{print $1}' )
+	len=$( echo $EXTENDS | awk -F":" '{print $2}' )
+	[ -z $len ] && continue
+	BEGIN=$( echo "print($begin + $PARTOFFSET)" | python - )
+	END=$( echo "print($len + $BEGIN)" | python )
 		echo "$DEVICE --nostart=$BEGIN --nostop=$END"
-	done
+		echo "$DEVICE --nostart=$BEGIN --nostop=$END" > $METAFILE.conf
 
 	;;
 'TYPE="disk"')
 	PARTOFFSET=0
-	EXTENDS=$( filefrag -b512 -v $METAFILE | awk 'NR>=4{print $4 ":" $6  }' |awk -F":" '{print $1 $2}' )
-	for EXTEND in $EXTENDS ; do
-		begin=$( echo $EXTEND | awk -F"." '{print $1}' )
-		len=$( echo $EXTEND | awk -F"." '{print $3}' )
-		[ -z $len ] && continue
-		BEGIN=$( echo "$begin + $PARTOFFSET" | bc )
-		END=$( echo "$len + $BEGIN" | bc )
-		echo "$DEVICE --nostart=$BEGIN --nostop=$END"
-	done
+	EXTENDS=$( filefrag -b512 -v $METAFILE | awk -F":" 'NR>=4{print $3":"$4}' )
+	begin=$( echo $EXTENDS | awk -F"." '{print $1}' )
+	len=$( echo $EXTENDS | awk -F":" '{print $2}' )
+	[ -z $len ] && continue
+	BEGIN=$( echo "print($begin + $PARTOFFSET)" | python - )
+	END=$( echo "print($len + $BEGIN)" | python - )
+	echo "$DEVICE --nostart=$BEGIN --nostop=$END"
+	echo "$DEVICE --nostart=$BEGIN --nostop=$END" > $METAFILE.conf
 	;;
 *)	
 	echo "disk type unsupported"

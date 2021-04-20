@@ -2404,5 +2404,5 @@ kernel/lib/ts_fsm.ko.xz:
 kernel/lib/cordic.ko.xz:
 kernel/lib/parman.ko.xz:
 kernel/virt/lib/irqbypass.ko.xz:
-extra/drbd/root/rpmbuild/BUILD/obj/default/drbd_transport_tcp.ko: extra/drbd/root/rpmbuild/BUILD/obj/default/drbd.ko kernel/lib/libcrc32c.ko.xz
-extra/drbd/root/rpmbuild/BUILD/obj/default/drbd.ko: kernel/lib/libcrc32c.ko.xz
+extra/dsg_drbd/root/rpmbuild/BUILD/obj/default/dsg_drbd.ko: kernel/lib/libcrc32c.ko.xz
+extra/dsg_drbd/root/rpmbuild/BUILD/obj/default/drbd_transport_tcp.ko: extra/dsg_drbd/root/rpmbuild/BUILD/obj/default/dsg_drbd.ko kernel/lib/libcrc32c.ko.xz

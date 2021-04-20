@@ -36,7 +36,7 @@ alias symbol:il_queue_space iwlegacy
 alias symbol:mb86a20s_attach mb86a20s
 alias symbol:rt2x00mac_get_stats rt2x00lib
 alias symbol:dm_kcopyd_client_destroy dm_mod
-alias symbol:drbd_path_event drbd
+alias symbol:drbd_path_event dsg_drbd
 alias symbol:dvb_usb_get_hexline dvb_usb
 alias symbol:nf_reject_ip6_tcphdr_put nf_reject_ipv6
 alias symbol:svc_proc_unregister sunrpc
@@ -884,7 +884,7 @@ alias symbol:dvb_dmx_init dvb_core
 alias symbol:mwifiex_queue_main_work mwifiex
 alias symbol:azx_stop_all_streams snd_hda_codec
 alias symbol:dibusb_i2c_algo dvb_usb_dibusb_common
-alias symbol:drbd_destroy_path drbd
+alias symbol:drbd_destroy_path dsg_drbd
 alias symbol:mlx4_mtt_cleanup mlx4_core
 alias symbol:ata_link_offline libata
 alias symbol:btcx_align btcx_risc
@@ -2300,13 +2300,13 @@ alias symbol:videobuf_read_stream videobuf_core
 alias symbol:adf_vf2pf_init intel_qat
 alias symbol:ata_sas_scsi_ioctl libata
 alias symbol:dev_attr_usbip_debug usbip_core
-alias symbol:drbd_get_listener drbd
+alias symbol:drbd_get_listener dsg_drbd
 alias symbol:rt2x00queue_unmap_skb rt2x00lib
 alias symbol:snd_soc_add_dai_controls snd_soc_core
 alias symbol:e4000_attach e4000
 alias symbol:rpc_malloc sunrpc
 alias symbol:sdhci_calc_clk sdhci
-alias symbol:drbd_destroy_connection drbd
+alias symbol:drbd_destroy_connection dsg_drbd
 alias symbol:drm_invalid_op drm
 alias symbol:flexcop_pass_dmx_data b2c2_flexcop
 alias symbol:nf_ct_free_hashtable nf_conntrack
@@ -2514,7 +2514,7 @@ alias symbol:ata_pci_bmdma_init_one libata
 alias symbol:uwb_rsv_destroy uwb
 alias symbol:vb2_plane_vaddr videobuf2_core
 alias symbol:ata_sas_port_alloc libata
-alias symbol:drbd_put_listener drbd
+alias symbol:drbd_put_listener dsg_drbd
 alias symbol:sas_tlr_supported scsi_transport_sas
 alias symbol:ata_scsi_port_error_handler libata
 alias symbol:fscache_io_error fscache
@@ -2620,7 +2620,7 @@ alias symbol:usb_stor_probe2 usb_storage
 alias symbol:wusbhc_handle_dn wusbcore
 alias symbol:ceph_osdc_setup libceph
 alias symbol:register_ip_vs_app_inc ip_vs
-alias symbol:drbd_should_abort_listening drbd
+alias symbol:drbd_should_abort_listening dsg_drbd
 alias symbol:ieee80211_rx_irqsafe mac80211
 alias symbol:ip_tunnel_init ip_tunnel
 alias symbol:sdhci_add_host sdhci
@@ -4798,7 +4798,7 @@ alias symbol:svcauth_gss_register_pseudoflavor auth_rpcgss
 alias symbol:usbnet_change_mtu usbnet
 alias symbol:__acpi_nfit_notify nfit
 alias symbol:dm_region_hash_destroy dm_region_hash
-alias symbol:drbd_register_transport_class drbd
+alias symbol:drbd_register_transport_class dsg_drbd
 alias symbol:rpc_restart_call sunrpc
 alias symbol:v4l_match_dv_timings v4l2_common
 alias symbol:cdc_ncm_tx_fixup cdc_ncm
@@ -5169,7 +5169,7 @@ alias symbol:tuner_count tuner_types
 alias symbol:rpc_destroy_wait_queue sunrpc
 alias symbol:snd_ctl_unregister_ioctl_compat snd
 alias symbol:snd_soc_dai_set_tdm_slot snd_soc_core
-alias symbol:drbd_find_path_by_addr drbd
+alias symbol:drbd_find_path_by_addr dsg_drbd
 alias symbol:nfs_fs_type nfs
 alias symbol:rpc_d_lookup_sb sunrpc
 alias symbol:rt2x00mac_sw_scan_start rt2x00lib
@@ -6162,7 +6162,7 @@ alias symbol:bt878_num bt878
 alias symbol:nf_conntrack_l4proto_udplite6 nf_conntrack
 alias symbol:snd_soc_put_strobe snd_soc_core
 alias symbol:dm_array_cursor_end dm_persistent_data
-alias symbol:drbd_stream_send_timed_out drbd
+alias symbol:drbd_stream_send_timed_out dsg_drbd
 alias symbol:nf_nat_need_gre nf_nat_proto_gre
 alias symbol:sdhci_enable_irq_wakeups sdhci
 alias symbol:virtio_transport_dgram_dequeue vmw_vsock_virtio_transport_common
@@ -6327,7 +6327,7 @@ alias symbol:drm_send_event drm
 alias symbol:nfs_pgio_header_alloc nfs
 alias symbol:rt2x00queue_get_entry rt2x00lib
 alias symbol:vhost_log_access_ok vhost
-alias symbol:drbd_unregister_transport_class drbd
+alias symbol:drbd_unregister_transport_class dsg_drbd
 alias symbol:iscsi_itt_to_ctask libiscsi
 alias symbol:sms_board_event smsmdtv
 alias symbol:mlx5_core_destroy_mkey mlx5_core
@@ -7101,7 +7101,7 @@ alias symbol:rpc_update_rtt sunrpc
 alias symbol:virtqueue_get_used_addr virtio_ring
 alias symbol:il_tx_queue_init iwlegacy
 alias symbol:kvm_release_pfn_clean kvm
-alias symbol:drbd_free_pages drbd
+alias symbol:drbd_free_pages dsg_drbd
 alias symbol:drm_i2c_encoder_commit drm
 alias symbol:ib_open_qp ib_core
 alias symbol:mt2063_attach mt2063
@@ -7571,7 +7571,7 @@ alias symbol:free_dca_provider dca
 alias symbol:mlx4_release_eq mlx4_core
 alias symbol:snd_opl3_find_patch snd_opl3_lib
 alias symbol:dm_suspended dm_mod
-alias symbol:drbd_alloc_pages drbd
+alias symbol:drbd_alloc_pages dsg_drbd
 alias symbol:nvmf_reg_read64 nvme_fabrics
 alias symbol:snd_hda_correct_pin_ctl snd_hda_codec
 alias symbol:snd_hdac_bus_get_response snd_hda_core

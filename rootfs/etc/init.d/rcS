@@ -8,17 +8,13 @@ mknod -m 660 console c 5 1
 mknod -m 660 null c 1 3
 mknod -m 660 urandom c 1 9
 mknod -m 660 random c 1 8
-mknod -m 660 sda b 8 0
-mknod -m 660 sdb b 8 1
-mknod -m 660 sdc b 8 2
-mknod -m 660 sdd b 8 3
-mknod -m 660 sde b 8 4
-mknod -m 660 sdf b 8 5
-mknod -m 660 sdg b 8 6
-mknod -m 660 sdh b 8 7
-mknod -m 660 sdi b 8 8
-mknod -m 660 sdj b 8 9
-mknod -m 660 sdk b 8 10
-mknod -m 660 sdl b 8 11
-mknod -m 660 sdm b 8 12
-mknod -m 660 sdn b 8 13
+
+echo "/sbin/mdev">/proc/sys/kernel/hotplug
+mdev -s
+
+iscsid
+modprobe sd_mod
+modprobe vmw_pvscsi
+modprobe iscsi_tcp
+modprobe loop max_loop=10
+mount -t debugfs nodev /sys/kernel/debug
